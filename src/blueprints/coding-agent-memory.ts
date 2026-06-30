@@ -242,6 +242,7 @@ const codingAgentMemory: Blueprint = {
       // Seeded FIRST so the convention below resolves its reference to it — the
       // loader creates seeds in array order, and a reference target must exist when
       // the referencing record is written.
+      surface: 'record',
       typeName: 'decision',
       externalId: 'seed-use-vectros-for-memory',
       fields: {
@@ -259,6 +260,7 @@ const codingAgentMemory: Blueprint = {
       // Demonstrates a live typed link at bootstrap: this convention references the
       // decision above by its externalId, so "open the decision behind this rule"
       // works the moment the blueprint is applied.
+      surface: 'record',
       typeName: 'convention',
       externalId: 'seed-record-the-why',
       fields: {

@@ -252,13 +252,56 @@ const BlueprintServicePrincipalSchema = z
   })
   .strict();
 
-const BlueprintSeedRecordSchema = z
+// A seed pre-populates the context at bootstrap. It is a DISCRIMINATED union on
+// `surface`, because the two surfaces are genuinely different shapes — not the
+// same object with a couple of optional extras:
+//   • a RECORD seed (`surface: 'record'`) carries its data in `fields` (the payload).
+//   • a DOCUMENT seed (`surface: 'document'`) is text-ingested: the platform's
+//     ingest path REQUIRES a first-class `title` and non-empty `text`, with optional
+//     structured `fields` (payload) bound to the schema. `title`/`text` are document
+//     attributes DISTINCT from payload — a record schema may itself declare a payload
+//     field literally named `title` (the bundled `decision` type does), so they can't
+//     be reserved keys inside `fields`.
+// `surface` is REQUIRED on every seed so each entry states its surface explicitly;
+// the discriminator routes the CLI loader to `createRecord` vs `ingestDocument` and
+// gives precise per-variant validation errors.
+const SeedCommonShape = {
+  /** The schema typeName this seed instantiates (should match a declared schema). */
+  typeName: z.string().min(1),
+  /**
+   * Stable, caller-supplied id — the loader's idempotency key AND the value other
+   * seeds resolve a `reference` against (across surfaces: a record seed may
+   * reference a document seed by its externalId, and vice versa).
+   */
+  externalId: z.string().min(1),
+} as const;
+
+const RecordSeedSchema = z
   .object({
-    typeName: z.string().min(1),
-    externalId: z.string().min(1),
+    surface: z.literal('record'),
+    ...SeedCommonShape,
+    /** The record payload, validated against the bound schema. */
     fields: z.record(z.unknown()),
   })
   .strict();
+
+const DocumentSeedSchema = z
+  .object({
+    surface: z.literal('document'),
+    ...SeedCommonShape,
+    /** Human-readable document title — REQUIRED by the text-ingest path. */
+    title: z.string().min(1),
+    /** Raw text content to ingest + index — REQUIRED and non-empty (the platform rejects a blank ingest). */
+    text: z.string().min(1),
+    /** Optional structured payload bound to the schema (the document's `fields`). */
+    fields: z.record(z.unknown()).optional(),
+  })
+  .strict();
+
+const BlueprintSeedRecordSchema = z.discriminatedUnion('surface', [
+  RecordSeedSchema,
+  DocumentSeedSchema,
+]);
 
 // `${{ self.* }}` is a RUNTIME per-principal placeholder (platform-resolved at
 // request time). It is only meaningful inside a role clause's
@@ -334,6 +377,29 @@ function lintIdentityRefsDeclared(value: unknown, ctx: z.RefinementCtx): void {
   walk(value, []);
 }
 
+// A seed's `surface` must be one the bound schema actually allows — e.g. a
+// `surface: 'document'` seed of a record-only type would fail the surface bind at
+// apply time. Caught offline (validate/plan) instead. A seed whose typeName has
+// no declared schema is NOT flagged here: the loader warns + skips it at apply,
+// and a blueprint may legitimately seed a pre-existing (un-redeclared) type.
+function lintSeedSurfaces(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as { schemas?: Array<{ typeName?: string; allowedSurfaces?: string[] }>; seed?: Array<{ typeName?: string; externalId?: string; surface?: string }> };
+  if (!Array.isArray(bp.seed)) return;
+  const byType = new Map((bp.schemas ?? []).map((s) => [s.typeName, s]));
+  bp.seed.forEach((seed, i) => {
+    const schema = byType.get(seed.typeName);
+    if (!schema) return;
+    const allowed = schema.allowedSurfaces ?? ['record'];
+    if (!allowed.includes(seed.surface ?? 'record')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['seed', i, 'surface'],
+        message: `seed '${seed.externalId}' uses surface '${seed.surface ?? 'record'}', but schema '${seed.typeName}' allows only [${allowed.join(', ')}]`,
+      });
+    }
+  });
+}
+
 export const BlueprintSchema = z
   .object({
     /** Stable blueprint id (the `--blueprint <name>` selector + idempotency key). */
@@ -360,12 +426,20 @@ export const BlueprintSchema = z
   .superRefine((bp, ctx) => {
     lintSelfTokenPlacement(bp, ctx);
     lintIdentityRefsDeclared(bp, ctx);
+    lintSeedSurfaces(bp, ctx);
   });
 
 export type Blueprint = z.infer<typeof BlueprintSchema>;
 export type BlueprintFieldDef = z.infer<typeof BlueprintFieldDefSchema>;
 export type BlueprintSchemaDef = z.infer<typeof BlueprintSchemaSchema>;
-export type BlueprintSeedRecord = z.infer<typeof BlueprintSeedRecordSchema>;
+/** A single seed entry — a record seed OR a document seed (discriminated on `surface`). */
+export type BlueprintSeed = z.infer<typeof BlueprintSeedRecordSchema>;
+/** The record-surface seed variant (`surface: 'record'`; the default). */
+export type BlueprintRecordSeed = z.infer<typeof RecordSeedSchema>;
+/** The document-surface seed variant (`surface: 'document'`; carries `title` + `text`). */
+export type BlueprintDocumentSeed = z.infer<typeof DocumentSeedSchema>;
+/** @deprecated The element type of `seed[]`, now a union — use {@link BlueprintSeed}. */
+export type BlueprintSeedRecord = BlueprintSeed;
 export type BlueprintValidationRules = z.infer<typeof ValidationRulesSchema>;
 export type BlueprintRenderHints = z.infer<typeof RenderHintsSchema>;
 export type BlueprintLookupField = z.infer<typeof BlueprintLookupFieldSchema>;

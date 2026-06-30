@@ -153,7 +153,7 @@ test('self: REJECTS ${{ self.* }} in accessProfile.dataScope (not a per-principa
 test('self: REJECTS ${{ self.* }} in a seed record field (never resolves there)', () => {
   const paths = issuePaths(
     minimal({
-      seed: [{ typeName: 'task', externalId: 'seed-1', fields: { owner: '${{ self.userId }}' } }],
+      seed: [{ surface: 'record', typeName: 'task', externalId: 'seed-1', fields: { owner: '${{ self.userId }}' } }],
     }),
   );
   assert.ok(paths.some((p) => p.startsWith('seed')), `expected a seed issue, got ${JSON.stringify(paths)}`);

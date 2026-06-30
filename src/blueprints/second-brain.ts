@@ -120,6 +120,7 @@ const secondBrain: Blueprint = {
 
   seed: [
     {
+      surface: 'record',
       typeName: 'note',
       externalId: 'seed-welcome',
       fields: {

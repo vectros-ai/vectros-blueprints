@@ -12,6 +12,9 @@ export {
   type Blueprint,
   type BlueprintFieldDef,
   type BlueprintSchemaDef,
+  type BlueprintSeed,
+  type BlueprintRecordSeed,
+  type BlueprintDocumentSeed,
   type BlueprintSeedRecord,
   type BlueprintValidationRules,
   type BlueprintRenderHints,
@@ -43,6 +46,7 @@ export {
 import type { Blueprint } from './types.js';
 import taskManagement from './blueprints/task-management.js';
 import codingAgentMemory from './blueprints/coding-agent-memory.js';
+import agenticSdlc from './blueprints/agentic-sdlc.js';
 import secondBrain from './blueprints/second-brain.js';
 import clinicalIntake from './blueprints/clinical-intake.js';
 
@@ -54,6 +58,7 @@ import clinicalIntake from './blueprints/clinical-intake.js';
 export const BUNDLED_BLUEPRINTS: readonly Blueprint[] = [
   taskManagement,
   codingAgentMemory,
+  agenticSdlc,
   secondBrain,
   clinicalIntake,
 ];

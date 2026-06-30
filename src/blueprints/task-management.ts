@@ -132,6 +132,7 @@ const taskManagement: Blueprint = {
 
   seed: [
     {
+      surface: 'record',
       typeName: 'task',
       externalId: 'seed-welcome',
       fields: {

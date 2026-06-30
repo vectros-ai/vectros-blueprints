@@ -62,7 +62,7 @@ test('resolves declared identities, substitutes tokens, strips the identities bl
   const out = (await resolveBlueprintIdentities(
     doc({
       identities: { owner: { kind: 'user', externalId: 'u-1' } },
-      seed: [{ typeName: 'task', externalId: 's1', fields: { owner: '${{ identities.owner }}' } }],
+      seed: [{ surface: 'record', typeName: 'task', externalId: 's1', fields: { owner: '${{ identities.owner }}' } }],
     }),
     fakeResolver(calls),
   )) as Record<string, any>;
@@ -147,7 +147,7 @@ test('parseBlueprint accepts a declared identity reference', () => {
   const bp = parseBlueprint(
     minimalBlueprint({
       identities: { owner: { kind: 'user', externalId: 'u-1' } },
-      seed: [{ typeName: 'task', externalId: 's1', fields: { owner: '${{ identities.owner }}' } }],
+      seed: [{ surface: 'record', typeName: 'task', externalId: 's1', fields: { owner: '${{ identities.owner }}' } }],
     } as Partial<Blueprint>),
   );
   assert.equal((bp as Record<string, any>).identities.owner.kind, 'user');

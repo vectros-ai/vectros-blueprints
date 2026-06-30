@@ -1,5 +1,8 @@
 # @vectros-ai/blueprints
 
+[![npm](https://img.shields.io/npm/v/@vectros-ai/blueprints)](https://www.npmjs.com/package/@vectros-ai/blueprints)
+[![license](https://img.shields.io/npm/l/@vectros-ai/blueprints)](https://www.apache.org/licenses/LICENSE-2.0)
+
 The Vectros **blueprint** format + the curated bundled library.
 
 A **blueprint** is a versioned, reviewed bundle for one use case: a schema
@@ -39,8 +42,14 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   `MCP — <name>` when the blueprint omits `contextName`.
 - `BUNDLED_BLUEPRINTS` / `BLUEPRINT_NAMES` / `getBlueprint(name)` — the
   curated library: `task-management` (the minimal authoring exemplar),
-  `coding-agent-memory`, `second-brain`, and `clinical-intake` (the flagship
-  use-case blueprints).
+  `coding-agent-memory`, `agentic-sdlc` (a whole-SDLC system of
+  record for an AI dev team: nine schemas split by content vs structure — ADRs,
+  designs, references, runbooks, and post-mortems as **documents**; controls,
+  conventions, gotchas, and a glossary as **records** — linked into a
+  **cross-surface** knowledge graph, with hybrid search + grounded `rag_ask`; see
+  [`guides/agentic-sdlc.md`](guides/agentic-sdlc.md) and the drop-in agent prompt
+  [`prompts/agentic-sdlc-agent.md`](prompts/agentic-sdlc-agent.md)),
+  `second-brain`, and `clinical-intake` (the PHI/sensitive-field exemplar).
 
 ## The format, field by field
 

@@ -67,9 +67,10 @@ test('contextNameOf prefers explicit contextName, else derives from name', () =>
 });
 
 test('bundled registry includes the curated library + getBlueprint works', () => {
-  assert.ok(BUNDLED_BLUEPRINTS.length >= 4);
+  assert.ok(BUNDLED_BLUEPRINTS.length >= 5);
   assert.ok(BLUEPRINT_NAMES.includes('task-management'));
   assert.ok(BLUEPRINT_NAMES.includes('coding-agent-memory'));
+  assert.ok(BLUEPRINT_NAMES.includes('agentic-sdlc'));
   assert.ok(BLUEPRINT_NAMES.includes('second-brain'));
   assert.ok(BLUEPRINT_NAMES.includes('clinical-intake'));
   assert.ok(getBlueprint('task-management'));
@@ -263,6 +264,317 @@ test('task-management requests exactly the documented least-privilege scopes', (
   assert.ok(!tm.accessProfile.allowedActions.includes('records:d'));
 });
 
+test('agentic-sdlc: 9 schemas split content (documents) vs structure (records)', () => {
+  const bp = getBlueprint('agentic-sdlc')!;
+  const typeNames = bp.schemas.map((s) => s.typeName).sort();
+  assert.deepEqual(typeNames, [
+    'control',
+    'convention',
+    'decision',
+    'design',
+    'gotcha',
+    'postmortem',
+    'reference',
+    'runbook',
+    'term',
+  ]);
+  // Content-dominant artifacts bind the DOCUMENT surface (body is the artifact).
+  const documents = ['decision', 'design', 'reference', 'runbook', 'postmortem'];
+  // Structure-dominant artifacts are records (typed fields are the artifact).
+  const records = ['control', 'convention', 'gotcha', 'term'];
+  const byType = new Map(bp.schemas.map((s) => [s.typeName, s]));
+  for (const t of documents) {
+    assert.deepEqual(byType.get(t)!.allowedSurfaces, ['document'], `${t} must bind the document surface`);
+  }
+  for (const t of records) {
+    assert.equal(byType.get(t)!.allowedSurfaces, undefined, `${t} is a record (defaults to ['record'])`);
+  }
+  // Every schema is HYBRID (keyword + semantic recall is the whole pitch).
+  for (const s of bp.schemas) assert.equal(s.indexMode, 'HYBRID', `${s.typeName} should be HYBRID`);
+  // The retired types from earlier drafts are gone.
+  for (const gone of ['handoff', 'incident', 'doc']) {
+    assert.ok(!byType.has(gone), `${gone} should no longer be a schema`);
+  }
+});
+
+test('agentic-sdlc: document schemas declare NO typed `title` field (a document carries an intrinsic title)', () => {
+  // A document's title is intrinsic (the ingest title, surfaced as document.title) —
+  // declaring a typed `title` field on a document schema is redundant AND a footgun:
+  // the top-level ingest `title` does not satisfy a typed required `title` field, so
+  // bootstrap/ingest 400s ("title cannot be empty") unless the title is duplicated
+  // into the payload. Documents therefore declare only the metadata BEYOND title/body.
+  // Records (no intrinsic title) may keep a `title` field where it's the headline.
+  const bp = getBlueprint('agentic-sdlc')!;
+  const byType = new Map(bp.schemas.map((s) => [s.typeName, s]));
+  for (const t of ['decision', 'design', 'reference', 'runbook', 'postmortem']) {
+    assert.ok(
+      !byType.get(t)!.fields.some((f) => f.fieldId === 'title'),
+      `${t} (document) must NOT declare a typed 'title' field — it has an intrinsic title`,
+    );
+  }
+});
+
+test('agentic-sdlc: SHOWCASE — a cross-surface knowledge graph (records → documents + doc → doc)', () => {
+  const bp = getBlueprint('agentic-sdlc')!;
+  const byType = new Map(bp.schemas.map((s) => [s.typeName, s]));
+  const ref = (type: string, field: string) =>
+    byType.get(type)!.fields.find((f) => f.fieldId === field);
+
+  // Every edge as (schema.field) → targetTypeName. Targets are all DOCUMENTS, so the
+  // records (control/convention/term) form record→document edges, and the documents
+  // form document→document edges. That cross-surface graph is the showcase.
+  const edges: Array<[string, string, string]> = [
+    ['decision', 'supersedes', 'decision'], // doc → doc (the ADR chain)
+    ['design', 'relatedDecision', 'decision'],
+    ['design', 'supersedes', 'design'],
+    ['reference', 'relatedDecision', 'decision'],
+    ['runbook', 'bornFrom', 'postmortem'],
+    ['runbook', 'relatedDecision', 'decision'],
+    ['postmortem', 'relatedDecision', 'decision'],
+    ['control', 'verifiedBy', 'runbook'], // record → document (the compliance-evidence edge)
+    ['control', 'relatedDecision', 'decision'], // record → document
+    ['convention', 'establishedBy', 'decision'], // record → document
+    ['term', 'relatedDecision', 'decision'], // record → document
+  ];
+  for (const [type, field, target] of edges) {
+    const f = ref(type, field);
+    assert.equal(f?.fieldType, 'reference', `${type}.${field} must be a reference`);
+    assert.equal(f?.targetTypeName, target, `${type}.${field} must target ${target}`);
+    // Every edge targets a DOCUMENT-surface type — so targetSurface must say so
+    // (else it 400s at createSchema / resolves the wrong surface).
+    assert.equal(f?.targetSurface, 'document', `${type}.${field} must set targetSurface: 'document'`);
+    assert.equal(f?.targetField, 'externalId', `${type}.${field} resolves by externalId`);
+    const isLookup = (byType.get(type)!.lookupFields ?? []).some(
+      (lf) => (typeof lf === 'string' ? lf : lf.fieldName) === field,
+    );
+    assert.ok(isLookup, `${type}.${field} should be an equality lookup (forward link query)`);
+  }
+  // The defining feature: at least the record→document edges (control/convention/term
+  // → a document). Confirm the records carry references into the document surface.
+  const recordToDoc = edges.filter(([t]) => ['control', 'convention', 'term'].includes(t));
+  assert.ok(recordToDoc.length >= 4, 'expected record→document edges (control/convention/term → documents)');
+});
+
+test('agentic-sdlc: SHOWCASE — a governance `control` (record) is proven by a `runbook` (document)', () => {
+  const control = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'control')!;
+  assert.equal(control.allowedSurfaces, undefined, 'control is a record');
+  // The policy → implementation spectrum in one filterable field.
+  const kind = control.fields.find((f) => f.fieldId === 'kind');
+  assert.deepEqual(kind?.enumValues, ['policy', 'standard', 'control']);
+  // Inline evidence (free text) + the typed, cross-surface runbook that proves it.
+  assert.ok(control.fields.some((f) => f.fieldId === 'evidence'));
+  const verifiedBy = control.fields.find((f) => f.fieldId === 'verifiedBy');
+  assert.equal(verifiedBy?.targetTypeName, 'runbook');
+  assert.equal(verifiedBy?.targetSurface, 'document', 'verifiedBy is a record→document edge');
+});
+
+test('agentic-sdlc: `convention` keeps rule / why / howToApply as separate fields', () => {
+  // The durable operating-memory: the rule, the reasoning, and the application are
+  // distinct fields (not one prose blob) so an agent recalls each independently.
+  const convention = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'convention')!;
+  const ids = convention.fields.map((f) => f.fieldId);
+  for (const f of ['rule', 'why', 'howToApply']) {
+    assert.ok(ids.includes(f), `convention must have a distinct '${f}' field`);
+  }
+  // All three are searchable (recalled by meaning).
+  for (const f of ['rule', 'why', 'howToApply']) {
+    assert.equal(convention.fields.find((x) => x.fieldId === f)?.searchable, true, `${f} searchable`);
+  }
+});
+
+test('agentic-sdlc: pins inference:r + the document/folder scopes its documented flows need', () => {
+  const actions = getBlueprint('agentic-sdlc')!.accessProfile.allowedActions;
+  // Grounded rag_ask over rationale/lesson bodies.
+  assert.ok(actions.includes('inference:r'));
+  // The SAME scoped key ingests narrative docs (the `doc` surface + folders).
+  for (const a of ['documents:r', 'documents:c', 'folders:r', 'folders:c']) {
+    assert.ok(actions.includes(a), `agentic-sdlc must request ${a} (the doc-ingest path)`);
+  }
+});
+
+test('agentic-sdlc: SHOWCASE — `term` (glossary) uses a UNIQUE exact-lookup', () => {
+  // The one uniqueness-constraint exemplar in the library: exact "define X" + a
+  // one-record-per-term guarantee.
+  const term = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'term')!;
+  const termLookup = (term.lookupFields ?? []).find(
+    (lf) => typeof lf !== 'string' && lf.fieldName === 'term',
+  );
+  assert.ok(termLookup && typeof termLookup !== 'string' && termLookup.unique === true, 'term is a unique lookup');
+  assert.equal(term.fields.find((f) => f.fieldId === 'term')?.renderHints?.displayField, true, 'term is the display field');
+});
+
+test('agentic-sdlc: requests EXACTLY its documented least-privilege scopes (the broadest bundled profile, pinned)', () => {
+  // This is the most-copied exemplar and the broadest profile in the library (10 scopes
+  // incl. documents:c/folders:c). Pin the exact array (mirrors the task-management pin)
+  // so a stray scope — a reorder, an unintended documents:d, or inference:c — is caught.
+  assert.deepEqual(getBlueprint('agentic-sdlc')!.accessProfile.allowedActions, [
+    'records:r',
+    'records:c',
+    'records:u',
+    'search:r',
+    'schemas:r',
+    'inference:r',
+    'documents:r',
+    'documents:c',
+    'folders:r',
+    'folders:c',
+  ]);
+});
+
+test('agentic-sdlc: every status/severity/criticality/docType enum is pinned (drift breaks documented queries)', () => {
+  // DESIGN frames enum drift as a real defect — the query patterns + GTM narrative cite
+  // these exact vocabularies. Silently narrowing one (dropping `deprecated`, `mitigated`,
+  // …) would ship green. Pin them all.
+  const bp = getBlueprint('agentic-sdlc')!;
+  const byType = new Map(bp.schemas.map((s) => [s.typeName, s]));
+  const enumOf = (type: string, field: string) =>
+    byType.get(type)!.fields.find((f) => f.fieldId === field)?.enumValues;
+  const expected: Array<[string, string, string[]]> = [
+    ['decision', 'status', ['proposed', 'accepted', 'superseded', 'deprecated']],
+    ['design', 'status', ['draft', 'active', 'implemented', 'superseded']],
+    ['reference', 'category', ['guide', 'onboarding', 'api', 'process', 'other']],
+    ['reference', 'status', ['active', 'superseded']],
+    ['runbook', 'status', ['active', 'retired']],
+    ['postmortem', 'severity', ['low', 'medium', 'high', 'critical']],
+    ['postmortem', 'status', ['open', 'mitigated', 'resolved']],
+    ['control', 'kind', ['policy', 'standard', 'control']],
+    ['control', 'criticality', ['low', 'medium', 'high', 'critical']],
+    ['control', 'status', ['draft', 'active', 'retired']],
+    ['convention', 'status', ['active', 'retired']],
+    ['gotcha', 'status', ['active', 'resolved']],
+  ];
+  for (const [type, field, values] of expected) {
+    assert.deepEqual(enumOf(type, field), values, `${type}.${field} enum drifted`);
+  }
+});
+
+test('agentic-sdlc: every schema carries exactly one range/sort date lookup (range on the when of every artifact)', () => {
+  // The pitch promises a range/sort lookup on every artifact's date. A schema silently
+  // losing its rangeEnabled row would pass the "ranges-are-dates" guard but break the
+  // promise — so assert each of the 9 schemas HAS exactly one, naming a date field.
+  for (const s of getBlueprint('agentic-sdlc')!.schemas) {
+    const ranges = (s.lookupFields ?? []).filter((lf) => typeof lf !== 'string' && lf.rangeEnabled);
+    assert.equal(ranges.length, 1, `${s.typeName} should have exactly one range/sort date lookup`);
+    const fieldName = typeof ranges[0] === 'string' ? ranges[0] : ranges[0].fieldName;
+    assert.equal(
+      s.fields.find((f) => f.fieldId === fieldName)?.fieldType,
+      'date',
+      `${s.typeName}.${fieldName} range lookup must be a date`,
+    );
+  }
+});
+
+test('agentic-sdlc: ships seedless in this version (the cross-surface graph is populated by ingest)', () => {
+  // The content artifacts live on the document surface; the cross-surface graph is filled
+  // by the ingest agent (document_ingest / record_create), not the bootstrap seed step
+  // (the loader seeds records only — tracked separately). Prod uses --no-seed regardless.
+  const bp = getBlueprint('agentic-sdlc')!;
+  assert.ok(!bp.seed || bp.seed.length === 0, 'agentic-sdlc carries no bundled seed in this version');
+});
+
+test('agentic-sdlc: each record schema has exactly one displayField headline (the positive half of content-vs-structure)', () => {
+  // Documents carry an intrinsic title (no typed field); records have no intrinsic
+  // title, so each must declare exactly one displayField headline — else it renders
+  // blank in a list view. control/convention use a typed `title`; gotcha/term use
+  // their domain key (`symptom`/`term`), where a literal `title` would be redundant.
+  const byType = new Map(getBlueprint('agentic-sdlc')!.schemas.map((s) => [s.typeName, s]));
+  const displayOf = (type: string) =>
+    byType.get(type)!.fields.filter((f) => f.renderHints?.displayField).map((f) => f.fieldId);
+  assert.deepEqual(displayOf('control'), ['title'], 'control headline is title');
+  assert.deepEqual(displayOf('convention'), ['title'], 'convention headline is title');
+  assert.deepEqual(displayOf('gotcha'), ['symptom'], 'gotcha headline is symptom');
+  assert.deepEqual(displayOf('term'), ['term'], 'term headline is term');
+  // The record `title` is a real first-class field (required + searchable), not decoration.
+  for (const t of ['control', 'convention']) {
+    const title = byType.get(t)!.fields.find((f) => f.fieldId === 'title')!;
+    assert.equal(title.required, true, `${t}.title must be required`);
+    assert.equal(title.searchable, true, `${t}.title must be searchable`);
+  }
+});
+
+test('agentic-sdlc: each schema ranges on its OWN semantic date field (pin the per-schema date map)', () => {
+  // Every schema has exactly one range/sort date (guarded elsewhere), but the schemas
+  // use deliberately DIFFERENT date semantics — a silent rename (occurredOn→updatedOn)
+  // would pass the "range is a date" guard yet break the documented query. Pin the map.
+  const byType = new Map(getBlueprint('agentic-sdlc')!.schemas.map((s) => [s.typeName, s]));
+  const rangeFieldOf = (type: string) => {
+    const r = (byType.get(type)!.lookupFields ?? []).find((lf) => typeof lf !== 'string' && lf.rangeEnabled);
+    return r && typeof r !== 'string' ? r.fieldName : undefined;
+  };
+  const expected: Record<string, string> = {
+    decision: 'date',
+    design: 'updatedOn',
+    reference: 'lastReviewed',
+    runbook: 'updatedOn',
+    postmortem: 'occurredOn',
+    control: 'reviewedOn',
+    convention: 'updatedOn',
+    gotcha: 'discoveredOn',
+    term: 'updatedOn',
+  };
+  for (const [type, field] of Object.entries(expected)) {
+    assert.equal(rangeFieldOf(type), field, `${type} must range on '${field}'`);
+  }
+});
+
+test('agentic-sdlc: `gotcha` is intentionally reference-free (the standalone trap type)', () => {
+  // gotcha is the one type with no typed edge (a trap is self-contained). Pin that
+  // intent so a future stray reference is flagged as a deliberate change, not a slip.
+  const gotcha = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'gotcha')!;
+  assert.ok(!gotcha.fields.some((f) => f.fieldType === 'reference'), 'gotcha must declare no reference field');
+});
+
+test('GUARD: any lookup sortBy names a required field or a platform timestamp (never an optional user field)', () => {
+  // Sorting an equality lookup by an OPTIONAL field silently drops records lacking it
+  // (README § lookupFields). A safe sortBy is either a `required` declared field or a
+  // platform-managed always-present timestamp. Guard the whole library against the class.
+  const PLATFORM_TIMESTAMPS = new Set(['createdAt', 'lastUpdated']);
+  for (const b of BUNDLED_BLUEPRINTS) {
+    for (const s of b.schemas) {
+      const requiredFields = new Set(s.fields.filter((f) => f.required).map((f) => f.fieldId));
+      for (const lf of s.lookupFields ?? []) {
+        if (typeof lf === 'string' || !lf.sortBy) continue;
+        assert.ok(
+          PLATFORM_TIMESTAMPS.has(lf.sortBy) || requiredFields.has(lf.sortBy),
+          `${b.name}.${s.typeName}.${lf.fieldName}: sortBy '${lf.sortBy}' must be a required field or a platform timestamp (else optional-field rows drop)`,
+        );
+      }
+    }
+  }
+});
+
+test('GUARD: every seed reference resolves to an earlier seed of the right type', () => {
+  // The platform enforces write-time existence: a reference target must exist when
+  // the referencing record is written, and the loader creates seeds in array order.
+  // So every seed reference value must name an EARLIER seed whose typeName matches the
+  // reference's targetTypeName. A mis-ordered seed fails `vectros bootstrap` against the
+  // live API but parses fine here — pin the ordering so it can't regress silently.
+  for (const b of BUNDLED_BLUEPRINTS) {
+    const schemaByType = new Map(b.schemas.map((s) => [s.typeName, s]));
+    const seen = new Map<string, string>(); // externalId → typeName, of seeds already created
+    for (const seed of b.seed ?? []) {
+      const schema = schemaByType.get(seed.typeName);
+      const refFields = (schema?.fields ?? []).filter((f) => f.fieldType === 'reference');
+      for (const rf of refFields) {
+        const value = seed.fields[rf.fieldId];
+        if (value === undefined || value === null) continue; // optional references may be unset
+        assert.equal(typeof value, 'string', `${b.name} seed ${seed.externalId}.${rf.fieldId} must be an externalId string`);
+        const targetType = seen.get(value as string);
+        assert.ok(
+          targetType !== undefined,
+          `${b.name} seed ${seed.externalId}.${rf.fieldId}='${value}' references a target not seeded earlier`,
+        );
+        assert.equal(
+          targetType,
+          rf.targetTypeName,
+          `${b.name} seed ${seed.externalId}.${rf.fieldId}='${value}' targets a ${targetType}, expected ${rf.targetTypeName}`,
+        );
+      }
+      seen.set(seed.externalId, seed.typeName);
+    }
+  }
+});
+
 test('GUARD: no bundled blueprint requests a delete or control-plane scope', () => {
   // These ship to prospects as least-privilege exemplars; a stray records:d or
   // a control-plane verb would be both a bad example and a scope-gate failure.
@@ -278,3 +590,141 @@ test('GUARD: no bundled blueprint requests a delete or control-plane scope', () 
     }
   }
 });
+
+test('GUARD: every reference targets a declared schema whose surface includes targetSurface', () => {
+  // Cross-surface references are the agentic-sdlc showcase, but the format does no
+  // cross-reference linting at parse time — a typo'd targetTypeName, or a targetSurface
+  // that disagrees with the target schema's allowedSurfaces, parses fine here and only
+  // 400s at live createSchema (or resolves the wrong surface). Pin both library-wide.
+  for (const b of BUNDLED_BLUEPRINTS) {
+    const byType = new Map(b.schemas.map((s) => [s.typeName, s]));
+    for (const s of b.schemas) {
+      for (const f of s.fields) {
+        if (f.fieldType !== 'reference') continue;
+        const target = byType.get(f.targetTypeName!);
+        assert.ok(
+          target !== undefined,
+          `${b.name}.${s.typeName}.${f.fieldId}: targetTypeName '${f.targetTypeName}' is not a declared schema`,
+        );
+        const targetSurfaces = target!.allowedSurfaces ?? ['record']; // default surface is record
+        const declared = f.targetSurface ?? 'record';
+        assert.ok(
+          targetSurfaces.includes(declared),
+          `${b.name}.${s.typeName}.${f.fieldId}: targetSurface '${declared}' not in ${f.targetTypeName}'s allowedSurfaces [${targetSurfaces.join(', ')}]`,
+        );
+      }
+    }
+  }
+});
+
+test('GUARD: no document-surface schema declares a typed `title` field (documents carry an intrinsic title)', () => {
+  // A document's title is intrinsic (the ingest title); a typed `title` field on a
+  // document schema duplicates it AND is a 400-on-ingest footgun (the top-level ingest
+  // title does not satisfy a typed required field). Generalize the agentic-sdlc check.
+  for (const b of BUNDLED_BLUEPRINTS) {
+    for (const s of b.schemas) {
+      if (!(s.allowedSurfaces ?? ['record']).includes('document')) continue;
+      assert.ok(
+        !s.fields.some((f) => f.fieldId === 'title'),
+        `${b.name}.${s.typeName} binds the document surface and must NOT declare a typed 'title' field`,
+      );
+    }
+  }
+});
+
+// ── seed surface discriminator (record vs document) ──────────────────────────
+
+/** A base blueprint object (untyped) for exercising raw seed shapes via parseBlueprint. */
+function withSeed(seed: unknown, schemas: unknown[] = [{ typeName: 'decision', displayName: 'Decision', allowedSurfaces: ['document'], fields: [] }]): Record<string, unknown> {
+  return {
+    name: 'demo',
+    version: '1.0.0',
+    description: 'demo blueprint',
+    contextId: 'mcp',
+    schemas,
+    accessProfile: { allowedActions: ['records:r'] },
+    servicePrincipal: { externalId: 'demo-sp', displayName: 'Demo SP' },
+    seed,
+  };
+}
+
+test('seed: accepts a record seed (surface record) with fields', () => {
+  const b = parseBlueprint(
+    withSeed(
+      [{ surface: 'record', typeName: 'task', externalId: 'r1', fields: { a: 1 } }],
+      [{ typeName: 'task', displayName: 'Task', fields: [] }], // record surface (default)
+    ),
+  );
+  assert.equal(b.seed?.[0].surface, 'record');
+});
+
+test('seed: accepts a document seed (surface document) with title + text + optional fields', () => {
+  const b = parseBlueprint(
+    withSeed([{ surface: 'document', typeName: 'decision', externalId: 'd1', title: 'ADR 1', text: 'because', fields: { status: 'accepted' } }]),
+  );
+  const seed = b.seed?.[0];
+  assert.equal(seed?.surface, 'document');
+  // The discriminated union narrows: title/text are first-class on a document seed.
+  assert.equal(seed?.surface === 'document' ? seed.title : undefined, 'ADR 1');
+});
+
+test('seed: a document seed may OMIT fields (title + text are the only content)', () => {
+  const b = parseBlueprint(withSeed([{ surface: 'document', typeName: 'decision', externalId: 'd1', title: 'ADR 1', text: 'because' }]));
+  assert.equal(b.seed?.[0].surface, 'document');
+});
+
+test('seed: REJECTS a document seed missing text (the ingest path requires it)', () => {
+  assert.throws(
+    () => parseBlueprint(withSeed([{ surface: 'document', typeName: 'decision', externalId: 'd1', title: 'ADR 1' }])),
+    BlueprintValidationError,
+  );
+});
+
+test('seed: REJECTS a document seed missing title', () => {
+  assert.throws(
+    () => parseBlueprint(withSeed([{ surface: 'document', typeName: 'decision', externalId: 'd1', text: 'because' }])),
+    BlueprintValidationError,
+  );
+});
+
+test('seed: REJECTS title/text on a RECORD seed (strict — those are document-only)', () => {
+  assert.throws(
+    () => parseBlueprint(withSeed([{ surface: 'record', typeName: 'decision', externalId: 'r1', fields: {}, title: 'nope', text: 'nope' }])),
+    BlueprintValidationError,
+  );
+});
+
+test('seed: REJECTS a missing/invalid surface discriminator', () => {
+  assert.throws(
+    () => parseBlueprint(withSeed([{ typeName: 'decision', externalId: 'r1', fields: {} }])),
+    BlueprintValidationError,
+  );
+  assert.throws(
+    () => parseBlueprint(withSeed([{ surface: 'user', typeName: 'decision', externalId: 'r1', fields: {} }])),
+    BlueprintValidationError,
+  );
+});
+
+test('seed: REJECTS a surface the schema does not allow (document seed of a record-only type)', () => {
+  const e = caught(() =>
+    parseBlueprint(
+      withSeed(
+        [{ surface: 'document', typeName: 'task', externalId: 'd1', title: 'T', text: 'x' }],
+        [{ typeName: 'task', displayName: 'Task', fields: [] }], // defaults to allowedSurfaces ['record']
+      ),
+    ),
+  );
+  assert.match(e.message, /surface 'document'/);
+  assert.match(e.message, /allows only \[record\]/);
+});
+
+/** Capture a thrown BlueprintValidationError (mirrors error-format.test.ts). */
+function caught(fn: () => unknown): BlueprintValidationError {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof BlueprintValidationError) return e;
+    throw e;
+  }
+  throw new Error('expected a BlueprintValidationError');
+}

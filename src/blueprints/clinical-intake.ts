@@ -153,6 +153,7 @@ const clinicalIntake: Blueprint = {
 
   seed: [
     {
+      surface: 'record',
       typeName: 'intake',
       externalId: 'seed-synthetic-intake',
       fields: {
