@@ -421,6 +421,32 @@ test('agentic-sdlc: requests EXACTLY its documented least-privilege scopes (the 
   ]);
 });
 
+test('agentic-sdlc: declares an `editor` role at PARITY with the service key (the human-owner join target, #536)', () => {
+  // The empty-app-after-bootstrap fix: `bootstrap` never grants the signed-in
+  // human owner an access profile, so the data-plane app's switcher (which lists
+  // only contexts the user holds an active profile in) shows nothing. The blueprint
+  // declares a reusable `editor` role the owner binds to themselves post-bootstrap
+  // (`vectros access grant --role editor`). It must be EDITOR PARITY with the
+  // service key — same data-plane actions, so a human curator can browse AND write.
+  const bp = getBlueprint('agentic-sdlc')!;
+  const editor = bp.roles?.editor;
+  assert.ok(editor, 'agentic-sdlc must declare an `editor` role for the owner join');
+  assert.equal(editor!.length, 1, 'the editor role is a single clause');
+  assert.deepEqual(
+    editor![0].allowedActions,
+    bp.accessProfile.allowedActions,
+    'editor role must be at parity with the service-key accessProfile',
+  );
+  // No dataScope: the owner sees the whole context (not an ownership-restricted slice).
+  assert.equal(editor![0].dataScope, undefined, 'editor role is unscoped (whole-context access)');
+  // Least-privilege preserved: no delete, no control-plane action leaks in via the role.
+  assert.ok(!editor![0].allowedActions.some((a) => a.endsWith(':d')), 'editor role has no delete');
+  assert.ok(
+    !editor![0].allowedActions.some((a) => a.startsWith('provisioning') || a.startsWith('app-contexts') || a.includes('users:') || a.includes('orgs:') || a.includes('clients:')),
+    'editor role carries no control-plane action',
+  );
+});
+
 test('agentic-sdlc: every status/severity/criticality/docType enum is pinned (drift breaks documented queries)', () => {
   // DESIGN frames enum drift as a real defect — the query patterns + GTM narrative cite
   // these exact vocabularies. Silently narrowing one (dropping `deprecated`, `mitigated`,

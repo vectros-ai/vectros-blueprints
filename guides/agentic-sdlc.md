@@ -32,6 +32,9 @@ populated, queryable KB, and to wiring an agent to use it day-to-day.
 - **A least-privilege key** — `records:r/c/u`, `search:r`, `schemas:r`,
   `inference:r`, `documents:r/c`, `folders:r/c`. No delete: knowledge is
   superseded/retired via a status flip, so the audit trail stays intact.
+- **An `editor` role for you, the human** — the same data-plane scope as the key,
+  ready to bind to your user so you can browse and curate the KB in the app (see
+  "Browse it as yourself" below).
 - **Range/sort on every artifact's date**, a governance `control` that records its
   own evidence, a `convention` with distinct rule/why/howToApply fields, and a
   glossary `term` with a `unique` exact-lookup.
@@ -70,6 +73,31 @@ it. (Prefer not to install globally? Prefix each command with `npx -y`, e.g.
 
 Add `--tenant test` to provision into the **test tenant** first (useful for a
 dry-run before committing to your live tenant). Omit for live (the default).
+
+### Browse it as yourself — grant your user access
+
+`bootstrap` provisions the context and a scoped key for your **agent** (the MCP
+server), but it does **not** join **you** — the signed-in human — to the new
+context. So when you open the data-plane app the context switcher won't list it
+yet: the app shows only contexts your user holds access in, and bootstrap grants
+your user none by default. Do this once so you can browse and curate the KB
+yourself. `bootstrap` already provisioned an **`editor`** role in the context
+(read + write, no delete — the same data-plane scope as the agent's key); bind it
+to your user two ways:
+
+- **In the admin app (easiest):** go to **Access → Contexts → `agentic-sdlc` →
+  Profiles → Create profile**, pick **yourself** (users list by email), choose the
+  **`editor`** role, and save.
+- **From the CLI:** `--principal me` resolves to your own user, so no id lookup is
+  needed:
+
+  ```bash
+  vectros access grant --principal me --context agentic-sdlc --role editor
+  ```
+
+  (Prefer an explicit id? `vectros identity list --type user` lists every tenant
+  user's id + email; your principal is `usr_` + the id next to your email.) Reopen
+  the data-plane app and `agentic-sdlc` now appears in the switcher with your data.
 
 ### Seeds
 

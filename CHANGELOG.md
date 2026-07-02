@@ -3,6 +3,22 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.6.3 — 2026-07-01
+
+### Added
+
+- **`agentic-sdlc` now declares an `editor` role for the human owner.** `bootstrap`
+  provisions a scoped key for your *agent*, but doesn't join *you* — so a blueprint's
+  context doesn't appear in the data-plane app until your own user is granted access
+  there. The blueprint now ships a reusable `editor` role at **parity with the service
+  key** (`records:r/c/u`, `search:r`, `schemas:r`, `inference:r`, `documents:r/c`,
+  `folders:r/c`; no delete, no control-plane), which `bootstrap` creates in the context.
+  Bind it to your user once to browse and curate the KB in the app:
+  `vectros access grant --principal usr_<your-user-id> --context agentic-sdlc --role editor`
+  (or via the admin app's Access → Contexts → Profiles). The guide and walkthrough
+  document the one-time join, and the package README now documents the top-level
+  `roles` format field (previously undocumented — no bundled blueprint used it).
+
 ## 0.6.2 — 2026-06-29
 
 ### Changed

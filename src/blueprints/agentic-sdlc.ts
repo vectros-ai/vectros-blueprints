@@ -44,6 +44,25 @@
  */
 import type { Blueprint } from '../types.js';
 
+// The data-plane action set this blueprint grants — shared by the service
+// principal's `accessProfile` (the `ssk_*` key's scope) AND the human-owner
+// `editor` role below, so the two can never drift out of parity. r/c/u records +
+// search + schema discovery + inference:r (grounded recall over document bodies)
+// + document/folder r/c. NO :d — knowledge is superseded/retired via a status
+// flip, so the trail of how the team's thinking evolved stays intact.
+const DATA_PLANE_ACTIONS = [
+  'records:r',
+  'records:c',
+  'records:u',
+  'search:r',
+  'schemas:r',
+  'inference:r',
+  'documents:r',
+  'documents:c',
+  'folders:r',
+  'folders:c',
+];
+
 const agenticSdlc: Blueprint = {
   name: 'agentic-sdlc',
   version: '1.0.0',
@@ -704,23 +723,26 @@ const agenticSdlc: Blueprint = {
     },
   ],
 
-  // Least-privilege, data-plane only. r/c/u records + search + schema discovery +
-  // inference:r (grounded recall over the document bodies) + document/folder r/c
-  // (the content artifacts are documents). NO :d — knowledge is superseded/retired
-  // via a status flip, so the trail of how the team's thinking evolved stays intact.
+  // Least-privilege, data-plane only. The scope of the `ssk_*` key the bootstrap
+  // mints for THIS blueprint's service principal (the MCP/API runtime). See
+  // DATA_PLANE_ACTIONS above for the action set + rationale.
   accessProfile: {
-    allowedActions: [
-      'records:r',
-      'records:c',
-      'records:u',
-      'search:r',
-      'schemas:r',
-      'inference:r',
-      'documents:r',
-      'documents:c',
-      'folders:r',
-      'folders:c',
-    ],
+    allowedActions: DATA_PLANE_ACTIONS,
+  },
+
+  // A reusable `editor` role for the HUMAN owner — DISTINCT from `accessProfile`
+  // (which scopes only the service-principal key). `bootstrap` provisions this
+  // role in the context but binds it to no one; the owner joins themselves so the
+  // data-plane app (app.vectros.ai) shows their KB — its switcher lists only
+  // contexts the signed-in user holds an active access profile in, and bootstrap
+  // grants the human none by default. Bind it after bootstrap with:
+  //   vectros access grant --principal usr_<your-user-id> --context agentic-sdlc --role editor
+  // (or the admin app's Access > Contexts > agentic-sdlc > Profiles > Create).
+  // Editor PARITY with the service key (same DATA_PLANE_ACTIONS) so a human
+  // curator can browse AND write/correct the KB; still no :d and no control-plane
+  // action, so the scope gate accepts it exactly like the accessProfile.
+  roles: {
+    editor: [{ allowedActions: DATA_PLANE_ACTIONS }],
   },
 
   servicePrincipal: {

@@ -115,6 +115,16 @@ The `accessProfile.dataScope` value lists accept a **`null` sentinel** — e.g.
 (owner-less / shared) records. Omitting `null` restricts the key to the listed
 owners only.
 
+A blueprint may also declare top-level **`roles`** — a map of `roleId` → ordered
+scope clauses (each an `allowedActions` list with an optional `dataScope`). Unlike
+`accessProfile` (which scopes the service-principal key `bootstrap` mints), roles
+are reusable, identity-agnostic rules you bind to a principal *after* bootstrap with
+`vectros access grant --principal <p> --role <roleId>`. `bootstrap` provisions the
+declared roles in the context but binds them to no one. The bundled `agentic-sdlc`
+ships an `editor` role for this — join your own user to the context so you can
+browse and curate the knowledge base in the app. Role clauses pass the same
+data-plane scope gate as `accessProfile`.
+
 All of the above are **optional and backward-compatible** — a blueprint that
 omits them parses and provisions exactly as before.
 
