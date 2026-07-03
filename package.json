@@ -1,6 +1,6 @@
 {
   "name": "@vectros-ai/blueprints",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Curated Vectros use-case blueprints (schemas + least-privilege AccessProfile + seed) and the Blueprint format + structural validation. Enforcement (the scope gate) lives in @vectros-ai/cli, not here.",
   "license": "Apache-2.0",
   "repository": {

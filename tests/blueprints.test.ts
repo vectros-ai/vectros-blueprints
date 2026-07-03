@@ -421,28 +421,34 @@ test('agentic-sdlc: requests EXACTLY its documented least-privilege scopes (the 
   ]);
 });
 
-test('agentic-sdlc: declares an `editor` role at PARITY with the service key (the human-owner join target, #536)', () => {
+test('agentic-sdlc: editor role = service-key data plane PLUS hard delete (the human-owner join target)', () => {
   // The empty-app-after-bootstrap fix: `bootstrap` never grants the signed-in
   // human owner an access profile, so the data-plane app's switcher (which lists
   // only contexts the user holds an active profile in) shows nothing. The blueprint
   // declares a reusable `editor` role the owner binds to themselves post-bootstrap
-  // (`vectros access grant --role editor`). It must be EDITOR PARITY with the
-  // service key — same data-plane actions, so a human curator can browse AND write.
+  // (`vectros access grant --role editor`). The trusted human owner gets the full
+  // data plane: every action the service key has, PLUS hard delete — the service
+  // key itself deliberately lacks delete and archives (soft-retract) instead.
   const bp = getBlueprint('agentic-sdlc')!;
   const editor = bp.roles?.editor;
   assert.ok(editor, 'agentic-sdlc must declare an `editor` role for the owner join');
   assert.equal(editor!.length, 1, 'the editor role is a single clause');
-  assert.deepEqual(
-    editor![0].allowedActions,
-    bp.accessProfile.allowedActions,
-    'editor role must be at parity with the service-key accessProfile',
-  );
-  // No dataScope: the owner sees the whole context (not an ownership-restricted slice).
+  const editorActions = editor![0].allowedActions;
+  // Superset of the service-key set — a human curator can do everything the agent can.
+  for (const a of bp.accessProfile.allowedActions) {
+    assert.ok(editorActions.includes(a), `editor role must include the service-key action ${a}`);
+  }
+  // PLUS hard delete across the data plane (the whole point of the human-owner role).
+  for (const del of ['records:d', 'documents:d', 'folders:d']) {
+    assert.ok(editorActions.includes(del), `editor role must grant ${del}`);
+  }
+  // No dataScope: the owner sees + deletes across the whole context (not an ownership slice).
+  // A per-user ownership-restricted delete is a separate concern (needs an identity on the
+  // credential) and is intentionally NOT modeled here.
   assert.equal(editor![0].dataScope, undefined, 'editor role is unscoped (whole-context access)');
-  // Least-privilege preserved: no delete, no control-plane action leaks in via the role.
-  assert.ok(!editor![0].allowedActions.some((a) => a.endsWith(':d')), 'editor role has no delete');
+  // Still data-plane only: no control-plane action leaks in via the role.
   assert.ok(
-    !editor![0].allowedActions.some((a) => a.startsWith('provisioning') || a.startsWith('app-contexts') || a.includes('users:') || a.includes('orgs:') || a.includes('clients:')),
+    !editorActions.some((a) => a.startsWith('provisioning') || a.startsWith('app-contexts') || a.includes('users:') || a.includes('orgs:') || a.includes('clients:') || a.includes('keys:') || a.includes('profiles:') || a.includes('billing') || a.includes('admin')),
     'editor role carries no control-plane action',
   );
 });
@@ -486,6 +492,31 @@ test('agentic-sdlc: every schema carries exactly one range/sort date lookup (ran
       s.fields.find((f) => f.fieldId === fieldName)?.fieldType,
       'date',
       `${s.typeName}.${fieldName} range lookup must be a date`,
+    );
+  }
+});
+
+test('agentic-sdlc: every RECORD schema carries `sourceRef` as a non-range equality lookup (the sync-back index)', () => {
+  // sourceRef is what makes record re-extraction work: on a source-file edit,
+  // `record_query {type, field:sourceRef, value:<path>}` returns exactly that file's records
+  // to re-distill. It MUST be a plain equality lookup (the file/path is the sync unit; the
+  // section lives in the externalId) and must NOT be rangeEnabled (that would steal the
+  // schema's single range slot from its date row). A silent removal would ship green and
+  // break the documented KB↔repo sync flow — so pin it.
+  for (const type of ['control', 'convention', 'gotcha', 'term']) {
+    const s = getBlueprint('agentic-sdlc')!.schemas.find((x) => x.typeName === type)!;
+    const lf = (s.lookupFields ?? []).find(
+      (l) => (typeof l === 'string' ? l : l.fieldName) === 'sourceRef',
+    );
+    assert.ok(lf, `${type} must carry a sourceRef lookup (the record sync-back index)`);
+    assert.ok(
+      typeof lf === 'string' || !lf.rangeEnabled,
+      `${type}.sourceRef must be a plain equality lookup, never rangeEnabled`,
+    );
+    assert.equal(
+      s.fields.find((f) => f.fieldId === 'sourceRef')?.fieldType,
+      'string',
+      `${type}.sourceRef must be a string field`,
     );
   }
 });

@@ -44,12 +44,13 @@
  */
 import type { Blueprint } from '../types.js';
 
-// The data-plane action set this blueprint grants — shared by the service
-// principal's `accessProfile` (the `ssk_*` key's scope) AND the human-owner
-// `editor` role below, so the two can never drift out of parity. r/c/u records +
-// search + schema discovery + inference:r (grounded recall over document bodies)
-// + document/folder r/c. NO :d — knowledge is superseded/retired via a status
-// flip, so the trail of how the team's thinking evolved stays intact.
+// The base data-plane action set — the scope of the `ssk_*` service-principal key
+// the bootstrap mints (the MCP/API runtime). r/c/u records + search + schema
+// discovery + inference:r (grounded recall over document bodies) + document/folder
+// r/c. Intentionally NO :d for the service key: the agent curates by superseding /
+// retiring knowledge via a reversible status flip (archive), never a hard delete —
+// so the trail of how the team's thinking evolved stays intact, and a compromised or
+// mistaken key cannot purge the KB. The human `editor` role additionally gets delete.
 const DATA_PLANE_ACTIONS = [
   'records:r',
   'records:c',
@@ -63,9 +64,16 @@ const DATA_PLANE_ACTIONS = [
   'folders:c',
 ];
 
+// The human owner's `editor` role: the base data-plane set PLUS hard delete across
+// the data plane. A human curator is trusted to permanently remove genuine strays /
+// mistakes; the agent service key is not — it archives (reversible) instead. Deleting
+// only your own data (rather than any in the context) is a tighter grant that needs a
+// per-user ownership identity on the credential; that variant is a separate concern.
+const EDITOR_ACTIONS = [...DATA_PLANE_ACTIONS, 'records:d', 'documents:d', 'folders:d'];
+
 const agenticSdlc: Blueprint = {
   name: 'agentic-sdlc',
-  version: '1.0.0',
+  version: '1.2.0',
   description:
     "A whole-SDLC system of record for an AI development team — decisions, designs, references, runbooks, post-mortems (as documents) plus controls, conventions, gotchas, and a glossary (as records), cross-linked and recalled by meaning.",
 
@@ -507,6 +515,19 @@ const agenticSdlc: Blueprint = {
           description: 'ISO-8601 last-reviewed date. Range-queryable.',
           renderHints: { label: 'Reviewed on', widget: 'date', order: 12 },
         },
+        {
+          // Provenance for sync: the source file this record was distilled from. A
+          // record can't carry an in-file marker the way a document can (many records
+          // come from one file), so it names its source instead — a change to that file
+          // finds (equality lookup) and re-extracts exactly its records. Equality, not
+          // range: file-level is the sync unit (re-extraction reprocesses the whole file),
+          // and the schema keeps its single range lookup for the date row.
+          fieldId: 'sourceRef',
+          fieldType: 'string',
+          filterable: true,
+          description: 'The source file (repo path) this record was extracted from — its provenance; a change to that file re-extracts its records. The specific section is encoded in the record externalId.',
+          renderHints: { label: 'Source ref', widget: 'text', order: 13 },
+        },
       ],
       lookupFields: [
         'kind',
@@ -516,6 +537,7 @@ const agenticSdlc: Blueprint = {
         'verifiedBy',
         'relatedDecision',
         { fieldName: 'reviewedOn', rangeEnabled: true },
+        'sourceRef',
       ],
     },
     {
@@ -593,8 +615,22 @@ const agenticSdlc: Blueprint = {
           description: 'ISO-8601 — when last revised. Range-queryable.',
           renderHints: { label: 'Updated on', widget: 'date', order: 9 },
         },
+        {
+          // Provenance for sync — see the note on `control.sourceRef`.
+          fieldId: 'sourceRef',
+          fieldType: 'string',
+          filterable: true,
+          description: 'The source file (repo path) this record was extracted from — its provenance; a change to that file re-extracts its records. The specific section is encoded in the record externalId.',
+          renderHints: { label: 'Source ref', widget: 'text', order: 10 },
+        },
       ],
-      lookupFields: ['area', 'status', 'establishedBy', { fieldName: 'updatedOn', rangeEnabled: true }],
+      lookupFields: [
+        'area',
+        'status',
+        'establishedBy',
+        { fieldName: 'updatedOn', rangeEnabled: true },
+        'sourceRef',
+      ],
     },
     {
       // A GOTCHA / sharp edge: a symptom, its cause, and the fix. A tight typed
@@ -649,8 +685,21 @@ const agenticSdlc: Blueprint = {
           description: 'ISO-8601 — when first hit. Range-queryable.',
           renderHints: { label: 'Discovered on', widget: 'date', order: 7 },
         },
+        {
+          // Provenance for sync — see the note on `control.sourceRef`.
+          fieldId: 'sourceRef',
+          fieldType: 'string',
+          filterable: true,
+          description: 'The source file (repo path) this record was extracted from — its provenance; a change to that file re-extracts its records. The specific section is encoded in the record externalId.',
+          renderHints: { label: 'Source ref', widget: 'text', order: 8 },
+        },
       ],
-      lookupFields: ['area', 'status', { fieldName: 'discoveredOn', rangeEnabled: true }],
+      lookupFields: [
+        'area',
+        'status',
+        { fieldName: 'discoveredOn', rangeEnabled: true },
+        'sourceRef',
+      ],
     },
     {
       // A glossary TERM — a definition keyed by the term itself. Structure-dominant:
@@ -711,6 +760,14 @@ const agenticSdlc: Blueprint = {
           description: 'ISO-8601 — when last revised. Range-queryable.',
           renderHints: { label: 'Updated on', widget: 'date', order: 7 },
         },
+        {
+          // Provenance for sync — see the note on `control.sourceRef`.
+          fieldId: 'sourceRef',
+          fieldType: 'string',
+          filterable: true,
+          description: 'The source file (repo path) this record was extracted from — its provenance; a change to that file re-extracts its records. The specific section is encoded in the record externalId.',
+          renderHints: { label: 'Source ref', widget: 'text', order: 8 },
+        },
       ],
       // `term` is a UNIQUE equality lookup — exact "define X" + a one-per-term
       // guarantee. `area`/`relatedDecision` enumerate; `updatedOn` is the range row.
@@ -719,6 +776,7 @@ const agenticSdlc: Blueprint = {
         'area',
         'relatedDecision',
         { fieldName: 'updatedOn', rangeEnabled: true },
+        'sourceRef',
       ],
     },
   ],
@@ -738,11 +796,13 @@ const agenticSdlc: Blueprint = {
   // grants the human none by default. Bind it after bootstrap with:
   //   vectros access grant --principal usr_<your-user-id> --context agentic-sdlc --role editor
   // (or the admin app's Access > Contexts > agentic-sdlc > Profiles > Create).
-  // Editor PARITY with the service key (same DATA_PLANE_ACTIONS) so a human
-  // curator can browse AND write/correct the KB; still no :d and no control-plane
-  // action, so the scope gate accepts it exactly like the accessProfile.
+  // The editor gets the full data plane so a human curator can browse, write/correct,
+  // AND hard-delete the KB (EDITOR_ACTIONS = the service key's set + delete). The
+  // service key deliberately lacks delete and archives instead; the trusted human
+  // owner may permanently remove genuine strays. Still no control-plane action, so
+  // the scope gate accepts it as a data-plane-only role.
   roles: {
-    editor: [{ allowedActions: DATA_PLANE_ACTIONS }],
+    editor: [{ allowedActions: EDITOR_ACTIONS }],
   },
 
   servicePrincipal: {

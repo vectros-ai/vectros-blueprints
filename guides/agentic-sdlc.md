@@ -130,7 +130,8 @@ document_ingest:
 ```
 
 Scope later searches to one type with `contentTypes: ["documents"], typeName:
-"decision"` (the document-type facet), plus `filters` for `area`/`tags`.
+"decision"` — `typeName` narrows documents and records alike (equivalently
+`filters: { recordType: "decision" }`), plus more `filters` for `area`/`tags`.
 
 ### Records — the structured artifacts (controls, conventions, gotchas, terms)
 
@@ -166,7 +167,17 @@ pauses or restarts simply converges — it never double-writes.
 
 ## 4. Query it
 
-Documents are queried via search (scoped by `typeName`); records via `record_query`.
+Reach for the most precise tool first: `record_query` for anything *enumerable*
+(exact, cheap, compact), `hybrid_search` to recall by meaning when you don't know
+the exact filter, `rag_ask` for a grounded *answer* over document bodies. Scope by
+type per tool: `hybrid_search` uses `typeName` (which narrows documents and records
+alike), `record_query` uses its `type` argument.
+
+Two `hybrid_search` gotchas worth knowing up front: hits carry the surrounding
+passage, so searches are *heavy* — start `limit:3` + `uniqueDocuments:true` and
+escalate only if needed; and the default `mode:HYBRID` uses `textMode:PHRASE`, so a
+long natural-language query can contribute nothing on the keyword leg (a `textScore`
+of `0` on every hit is the tell) — use a short keyword phrase or `textMode:"OR"`.
 
 | You want… | Call |
 |---|---|
@@ -175,7 +186,7 @@ Documents are queried via search (scoped by `typeName`); records via `record_que
 | "What's the active rule for area X?" | `record_query convention { area:"<area>", status:"active" }` |
 | "Have we hit this failure before?" | `hybrid_search "<symptom>" contentTypes:["documents"], typeName:"postmortem"`; plus `record_query gotcha { area:"deploy", status:"active" }` |
 | "Define X" | `record_query term { term:"X" }` (unique lookup) |
-| "Latest decisions / search the designs" | `hybrid_search "<topic>" contentTypes:["documents"], typeName:"decision"` (or `"design"`), `filters:{ area:"<area>" }` |
+| "Latest decisions / search the designs" | `hybrid_search "<topic>" contentTypes:["documents"], typeName:"decision"` (or `"design"`, plus `filters:{ area:"<area>" }`) |
 | "What supersedes a given decision?" | document lookup on `decision` by `supersedes:"<externalId>"` |
 
 ## 5. Customize
@@ -236,3 +247,78 @@ change — every type already has `tags`.)
 - **Re-ingest is keyed on `externalId`** — a backfill never double-writes (an
   unchanged item returns as-is), re-ingesting edited source with `upsert: true` keeps
   the KB in sync, and the KB can be rebuilt from source at any time.
+
+### Keep it in sync with your source — the self-describing marker
+
+If your knowledge lives in a repo (docs, decision records, runbooks) and the KB mirrors
+it, the two drift the moment someone edits a file. A durable pattern keeps them together
+without a fragile side-index.
+
+**Stamp each mirrored file with its KB id, in the file itself** — a one-line HTML comment
+at the top:
+
+```markdown
+<!-- vectros-kb-id: ref-data-model -->
+# Data model reference
+```
+
+- **It's invisible.** An HTML comment renders to nothing in Markdown — on your docs site
+  and in the repository view alike — so it never shows on the page, even for files that
+  are also documentation-site source.
+- **The id travels with the file.** Move or rename the file and the binding is unchanged;
+  because references resolve by `externalId`, your cross-links never break.
+- **No side ledger to maintain.** The file is self-describing — there is no separate
+  path-to-id map to keep in lockstep with every add, move, and rename.
+
+**Sync is then a one-liner:** on change, re-ingest the file under the id in its marker with
+`upsert: true` — the body re-indexes while the id, typed fields, and edges stay put. A
+merge hook that re-ingests every changed marked file keeps the KB fresh automatically.
+
+**The marker is also your membership signal:** a file belongs in the KB exactly when it
+carries a marker, so "add this to the KB" is a one-line edit and unmarked files are simply
+never mirrored — the KB stays a curated subset, not a copy of the whole repo.
+
+### The same, for records extracted from a file
+
+Records are *distilled* from a source — a glossary becomes many `term` records, a
+conventions doc becomes many `convention` records — so one file maps to many records, and
+there's no single line to stamp with one id. Two small conventions keep them in sync
+anyway:
+
+**1. Each record carries a `sourceRef`** — the identifier of the file it was distilled from.
+So "which records came from this file?" is one query:
+
+```text
+record_query  type:term  field:sourceRef  value:<ref>
+```
+
+**2. The source file declares itself** with a companion marker that names the record
+type(s) it feeds and pins that `ref`:
+
+```markdown
+<!-- vectros-kb-records: term ref=glossary.md -->
+# Glossary
+```
+
+Sync is then symmetric with documents: on a change to a marked source file, read its
+marker, query its existing records by `sourceRef`, re-distill, and `upsert` each by its
+stable `externalId` — refreshing changed ones, adding new headings, superseding any that
+disappeared. Because the `ref` is pinned in the marker (not read from the path), moving the
+file never breaks the link.
+
+**Two markers, one model:** `vectros-kb-id` marks a file that *is* a KB document;
+`vectros-kb-records` marks a file that *feeds* KB records. A file can carry either. With
+both, nothing about your KB lives in a separate index — every synced file says what it is,
+right in the file.
+
+### Promote durable knowledge into your repo, then the KB
+
+If your agent keeps a private memory or working-notes file, treat it as a **staging area**,
+not a second home for knowledge. When a note matures into something durable and shareable,
+**promote it one-way** into the right repo doc (a conventions file, a troubleshooting
+reference, a post-mortem) — the broadest type that fits — then let the marker + `sourceRef`
+sync above carry it into the KB. Once the repo doc is committed and the ingest is confirmed,
+collapse the memory note to a one-line pointer at the repo path (and only then — working
+notes usually aren't version-controlled). The result: one golden copy per lesson (the repo),
+one queryable projection (the KB), and a breadcrumb in memory — never the same prose in three
+places.
