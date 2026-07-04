@@ -3,6 +3,21 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.6.5 — 2026-07-04
+
+### Fixed
+
+- **`agentic-sdlc` service key now includes `documents:u`** (blueprint `1.2.0 → 1.3.0`).
+  The bootstrapped service-principal `accessProfile` was missing `documents:u`, so the
+  agent key could create documents but could neither archive them (a reversible
+  `ARCHIVED` status flip — the document-surface analog of the `records:u` supersede it
+  already does) nor re-ingest a changed document body (`document_ingest` with `upsert`,
+  the repo↔KB sync primitive the bundled guide documents). The whole KB-sync story was
+  therefore unexecutable by the very key the blueprint provisions. `documents:u` is now
+  in the base data-plane set. Hard delete (`documents:d`) remains deliberately absent
+  from the service key — it stays on the human `editor` role — so an archived document
+  is always restorable and a compromised key can never purge the knowledge base.
+
 ## 0.6.4 — 2026-07-03
 
 ### Added

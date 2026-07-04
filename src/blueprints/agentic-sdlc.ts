@@ -39,18 +39,28 @@
  * use `vectros bootstrap --no-seed` regardless.)
  *
  * allowedActions = [records:r, records:c, records:u, search:r, schemas:r,
- *                   inference:r, documents:r, documents:c, folders:r, folders:c].
- * Knowledge is SUPERSEDED / RETIRED via a status flip, never deleted (no :d).
+ *                   inference:r, documents:r, documents:c, documents:u,
+ *                   folders:r, folders:c].
+ * Knowledge is SUPERSEDED / RETIRED via a reversible status flip (records:u for
+ * records, documents:u to archive/re-ingest a document body), never hard-deleted
+ * (no :d for the service key — that stays on the human `editor` role).
  */
 import type { Blueprint } from '../types.js';
 
 // The base data-plane action set — the scope of the `ssk_*` service-principal key
 // the bootstrap mints (the MCP/API runtime). r/c/u records + search + schema
-// discovery + inference:r (grounded recall over document bodies) + document/folder
-// r/c. Intentionally NO :d for the service key: the agent curates by superseding /
-// retiring knowledge via a reversible status flip (archive), never a hard delete —
-// so the trail of how the team's thinking evolved stays intact, and a compromised or
-// mistaken key cannot purge the KB. The human `editor` role additionally gets delete.
+// discovery + inference:r (grounded recall over document bodies) + document r/c/u +
+// folder r/c. `documents:u` is load-bearing, not incidental: it is what lets the
+// agent (a) SOFT-RETRACT a document via a reversible status flip (`ARCHIVED` pulls it
+// from recall while keeping the row + body — the document-surface analog of the
+// `records:u` supersede the agent already does), and (b) RE-INGEST a changed document
+// body (`document_ingest` with `upsert`), which is the repo↔KB sync primitive the
+// bundled guide documents. Without it the agent could create docs but never keep them
+// fresh or retire them — it would only ever accrete stale content.
+// Intentionally NO :d for the service key: the agent curates by that reversible
+// archive, never a hard delete — so the trail of how the team's thinking evolved
+// stays intact, and a compromised or mistaken key cannot PURGE the KB (an archived
+// document is always restorable). The human `editor` role additionally gets delete.
 const DATA_PLANE_ACTIONS = [
   'records:r',
   'records:c',
@@ -60,6 +70,7 @@ const DATA_PLANE_ACTIONS = [
   'inference:r',
   'documents:r',
   'documents:c',
+  'documents:u',
   'folders:r',
   'folders:c',
 ];
@@ -73,7 +84,7 @@ const EDITOR_ACTIONS = [...DATA_PLANE_ACTIONS, 'records:d', 'documents:d', 'fold
 
 const agenticSdlc: Blueprint = {
   name: 'agentic-sdlc',
-  version: '1.2.0',
+  version: '1.3.0',
   description:
     "A whole-SDLC system of record for an AI development team — decisions, designs, references, runbooks, post-mortems (as documents) plus controls, conventions, gotchas, and a glossary (as records), cross-linked and recalled by meaning.",
 

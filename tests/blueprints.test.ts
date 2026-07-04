@@ -404,9 +404,11 @@ test('agentic-sdlc: SHOWCASE — `term` (glossary) uses a UNIQUE exact-lookup', 
 });
 
 test('agentic-sdlc: requests EXACTLY its documented least-privilege scopes (the broadest bundled profile, pinned)', () => {
-  // This is the most-copied exemplar and the broadest profile in the library (10 scopes
-  // incl. documents:c/folders:c). Pin the exact array (mirrors the task-management pin)
-  // so a stray scope — a reorder, an unintended documents:d, or inference:c — is caught.
+  // This is the most-copied exemplar and the broadest profile in the library (11 scopes
+  // incl. documents:c/documents:u/folders:c). documents:u is the reversible curation
+  // scope (archive + body re-ingest); documents:d is deliberately ABSENT (editor-only).
+  // Pin the exact array (mirrors the task-management pin) so a stray scope — a reorder,
+  // an unintended documents:d, or inference:c — is caught.
   assert.deepEqual(getBlueprint('agentic-sdlc')!.accessProfile.allowedActions, [
     'records:r',
     'records:c',
@@ -416,6 +418,7 @@ test('agentic-sdlc: requests EXACTLY its documented least-privilege scopes (the 
     'inference:r',
     'documents:r',
     'documents:c',
+    'documents:u',
     'folders:r',
     'folders:c',
   ]);

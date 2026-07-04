@@ -30,11 +30,13 @@ populated, queryable KB, and to wiring an agent to use it day-to-day.
   `design.relatedDecision`, `runbook.bornFrom` → a `postmortem`). Provenance is
   navigable, not just searchable.
 - **A least-privilege key** — `records:r/c/u`, `search:r`, `schemas:r`,
-  `inference:r`, `documents:r/c`, `folders:r/c`. No delete: knowledge is
-  superseded/retired via a status flip, so the audit trail stays intact.
-- **An `editor` role for you, the human** — the same data-plane scope as the key,
-  ready to bind to your user so you can browse and curate the KB in the app (see
-  "Browse it as yourself" below).
+  `inference:r`, `documents:r/c/u`, `folders:r/c`. No hard delete: knowledge is
+  superseded/retired via a reversible status flip (and `documents:u` re-ingests an
+  edited body to keep the KB in sync with its source), so the audit trail stays intact.
+- **An `editor` role for you, the human** — the key's data-plane scope plus hard
+  delete (`records:d` / `documents:d` / `folders:d`), ready to bind to your user so you
+  can browse and curate the KB in the app (see "Browse it as yourself" below). A human
+  curator can permanently remove genuine strays; the agent key only archives.
 - **Range/sort on every artifact's date**, a governance `control` that records its
   own evidence, a `convention` with distinct rule/why/howToApply fields, and a
   glossary `term` with a `unique` exact-lookup.
@@ -82,8 +84,9 @@ context. So when you open the data-plane app the context switcher won't list it
 yet: the app shows only contexts your user holds access in, and bootstrap grants
 your user none by default. Do this once so you can browse and curate the KB
 yourself. `bootstrap` already provisioned an **`editor`** role in the context
-(read + write, no delete — the same data-plane scope as the agent's key); bind it
-to your user two ways:
+(read + write + hard delete — the agent key's data-plane scope plus `records:d` /
+`documents:d` / `folders:d`, so a human curator can permanently remove strays where the
+agent only archives); bind it to your user two ways:
 
 - **In the admin app (easiest):** go to **Access → Contexts → `agentic-sdlc` →
   Profiles → Create profile**, pick **yourself** (users list by email), choose the
