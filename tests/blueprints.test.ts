@@ -160,9 +160,11 @@ test('SHOWCASE: clinical-intake finds an intake by PHI via a sensitive blind-ind
 });
 
 test('SHOWCASE: bundled date fields are range-queryable and re-model nothing that sorts wrong', () => {
-  // Every range-enabled bundled lookup names an ISO-8601 date field (lexical order ==
-  // chronological order — safe to lock). Pins the audit decision that ordinal enums
-  // (e.g. task priority low<urgent) were deliberately left as equality, not range.
+  // Every range-enabled bundled lookup names a SORT-SAFE field: a `date` (ISO-8601, lexical
+  // order == chronological) or a `number` (agentic-sdlc `memory.priority` band — the
+  // platform's encodeSortableValue lexically encodes both). Pins the audit decision that
+  // ordinal enum STRINGS (e.g. task priority low<urgent) are deliberately left as equality,
+  // NOT range — they don't sort lexically; a numeric band does.
   const rangeFields: string[] = [];
   for (const b of BUNDLED_BLUEPRINTS) {
     for (const s of b.schemas) {
@@ -170,10 +172,9 @@ test('SHOWCASE: bundled date fields are range-queryable and re-model nothing tha
         if (typeof lf === 'string' || !lf.rangeEnabled) continue;
         rangeFields.push(lf.fieldName);
         const fld = s.fields.find((f) => f.fieldId === lf.fieldName);
-        assert.equal(
-          fld?.fieldType,
-          'date',
-          `${b.name}.${s.typeName}.${lf.fieldName}: range lookups are reserved for date fields (lexical==chronological)`,
+        assert.ok(
+          fld?.fieldType === 'date' || fld?.fieldType === 'number',
+          `${b.name}.${s.typeName}.${lf.fieldName}: range lookups are reserved for sort-safe types (date | number); saw ${fld?.fieldType}`,
         );
       }
     }
@@ -196,7 +197,7 @@ test('SHOWCASE: coding-agent-memory links a convention to its decision via a typ
   // A seeded convention resolves the link at bootstrap (decision seeded first; the
   // loader sends externalId top-level so the target's first-class externalId resolves).
   const seed = (cam.seed ?? []).find((r) => r.typeName === 'convention');
-  assert.equal(seed?.fields.establishedByDecision, 'seed-use-vectros-for-memory');
+  assert.equal(seed?.fields?.establishedByDecision, 'seed-use-vectros-for-memory');
 });
 
 test('GUARD: no bundled schema declares a reserved identifier as a lookup field', () => {
@@ -264,7 +265,7 @@ test('task-management requests exactly the documented least-privilege scopes', (
   assert.ok(!tm.accessProfile.allowedActions.includes('records:d'));
 });
 
-test('agentic-sdlc: 9 schemas split content (documents) vs structure (records)', () => {
+test('agentic-sdlc: 10 schemas split content (documents) vs structure (records) + isolated memory', () => {
   const bp = getBlueprint('agentic-sdlc')!;
   const typeNames = bp.schemas.map((s) => s.typeName).sort();
   assert.deepEqual(typeNames, [
@@ -273,6 +274,7 @@ test('agentic-sdlc: 9 schemas split content (documents) vs structure (records)',
     'decision',
     'design',
     'gotcha',
+    'memory',
     'postmortem',
     'reference',
     'runbook',
@@ -280,8 +282,10 @@ test('agentic-sdlc: 9 schemas split content (documents) vs structure (records)',
   ]);
   // Content-dominant artifacts bind the DOCUMENT surface (body is the artifact).
   const documents = ['decision', 'design', 'reference', 'runbook', 'postmortem'];
-  // Structure-dominant artifacts are records (typed fields are the artifact).
-  const records = ['control', 'convention', 'gotcha', 'term'];
+  // Structure-dominant records (typed fields are the artifact). `memory` is a
+  // record too, but a DIFFERENT genre — per-principal isolated agent memory (the
+  // private tier), distinct from the team's curated shared knowledge above.
+  const records = ['control', 'convention', 'gotcha', 'term', 'memory'];
   const byType = new Map(bp.schemas.map((s) => [s.typeName, s]));
   for (const t of documents) {
     assert.deepEqual(byType.get(t)!.allowedSurfaces, ['document'], `${t} must bind the document surface`);
@@ -456,6 +460,106 @@ test('agentic-sdlc: editor role = service-key data plane PLUS hard delete (the h
   );
 });
 
+test('agentic-sdlc: the `member` role composes two memory tiers (shared KB + private) as UNIONed clauses', () => {
+  const bp = getBlueprint('agentic-sdlc')!;
+  const member = bp.roles?.member;
+  assert.ok(member, 'agentic-sdlc must declare a `member` role');
+  assert.equal(member!.length, 2, 'member is two clauses: shared-KB recall + private memory');
+
+  // Clause 1 — the CURATED shared KB (+ semantic recall). UNSCOPED, but safe:
+  // TYPE-SCOPED away from `memory`, and search/inference admission is per-row
+  // gated by the clause's typed record grants — so recall admits only the
+  // curated types + documents, never any principal's private memory.
+  const shared = member![0];
+  assert.equal(shared.dataScope, undefined, 'shared-KB clause is UNSCOPED (recall bounded by per-type grants, not by org)');
+  for (const a of shared.allowedActions) {
+    assert.ok(a !== 'records:r', 'shared-read must be TYPE-SCOPED, never blanket records:r');
+    assert.ok(!/^records:[a-z]+:memory$/.test(a), `shared clause must not touch the memory type (${a})`);
+  }
+  for (const a of [
+    'records:r:control',
+    'records:r:convention',
+    'records:r:gotcha',
+    'records:r:term',
+    'documents:r',
+    'search:r',
+    'inference:r',
+  ]) {
+    assert.ok(shared.allowedActions.includes(a), `member shared clause should include ${a}`);
+  }
+
+  // Clause 2 — PRIVATE memory: the member's own records only, on the stable
+  // principal (userId) dimension.
+  const priv = member![1];
+  assert.deepEqual(priv.dataScope, { userId: ['${{ self.userId }}'] }, 'private memory is self-scoped by userId');
+  assert.ok(priv.allowedActions.includes('records:cru:memory'), 'member owns full CRU over its memory');
+  assert.ok(priv.allowedActions.includes('search:r'), 'member can semantically recall its own memory');
+  // `inference:r` must live in THIS self-scoped clause too (not only the curated
+  // clause 1, which excludes the memory type) — otherwise `rag_ask` could not
+  // ground on the member's own private memory. The read grant + inference travel
+  // together in one clause, so grounding is independent of cross-clause admission.
+  assert.ok(priv.allowedActions.includes('inference:r'), 'member can rag_ask/ground over its OWN memory');
+
+  // No org/team scope is baked in this version (the shared-scope ownership axis
+  // is being finalized) — the team tier is a deliberate future addition.
+  for (const clause of member!) {
+    assert.ok(!('orgId' in (clause.dataScope ?? {})), 'no orgId scope baked into the member role this version');
+  }
+
+  // Role-wide invariants: no hard delete (memory is superseded, never purged);
+  // data-plane only.
+  for (const clause of member!) {
+    assert.ok(
+      !clause.allowedActions.some((a) => a.startsWith('records:d') || a.startsWith('documents:d') || a.startsWith('folders:d')),
+      'member never hard-deletes',
+    );
+    assert.ok(
+      !clause.allowedActions.some((a) => a.startsWith('provisioning') || a.startsWith('app-contexts') || a.includes('keys:') || a.includes('profiles:') || a.includes('billing') || a.includes('admin')),
+      'member role carries no control-plane action',
+    );
+  }
+
+  // ⚠ LOAD-BEARING INVARIANT: no member clause may grant document CREATE/UPDATE.
+  // The shared clause is unscoped and documents have no per-type qualifier fence,
+  // so `documents:r` reads EVERY document — safe only because no member can mint
+  // one (no private doc can exist). Adding documents:c to the member role
+  // requires documents to first gain a per-type read qualifier.
+  for (const clause of member!) {
+    assert.ok(
+      !clause.allowedActions.some((a) => /^documents:[a-z]*[cu]/.test(a)),
+      `member must not create/update documents (unscoped doc read has no type fence): ${clause.allowedActions.join(',')}`,
+    );
+  }
+});
+
+test('agentic-sdlc: this version bakes NO org/team ownership (deferred to the shared-scope model)', () => {
+  const bp = getBlueprint('agentic-sdlc')!;
+  // No org identity declared, and the service key stamps no org override — the
+  // curated KB is owner-plain and the member shared clause reads it unscoped.
+  assert.equal(bp.identities, undefined, 'no identities block (no team org) this version');
+  assert.equal(bp.accessProfile.identityOverrides, undefined, 'service key stamps no org override');
+});
+
+test('agentic-sdlc: memory keeps a LEAN lookup set — structure axes stay filterable, only deterministic-enumeration fields are lookups', () => {
+  const memory = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'memory')!;
+  const byId = new Map(memory.fields.map((f) => [f.fieldId, f]));
+  // The structure axes are all `filterable` (typed SEARCH metadata — they narrow recall).
+  for (const f of ['kind', 'area', 'agent', 'status', 'threadId']) {
+    assert.ok(byId.get(f)?.filterable, `memory.${f} must be filterable`);
+  }
+  const lookups = (memory.lookupFields ?? []).map((l) => (typeof l === 'string' ? l : l.fieldName));
+  // memory is the HIGHEST-VOLUME record, so lookups are reserved for fields we ENUMERATE
+  // deterministically (a per-write lookup row is expensive at volume).
+  for (const f of ['kind', 'threadId', 'updatedOn', 'priority']) {
+    assert.ok(lookups.includes(f), `memory lookupFields must include ${f}`);
+  }
+  // area/agent/status/sourceRef are filterable-only (or plain) — NOT lookups. Pin the lean
+  // decision so a future re-add is a conscious, reviewed choice, not silent write bloat.
+  for (const f of ['area', 'agent', 'status', 'sourceRef']) {
+    assert.ok(!lookups.includes(f), `memory.${f} must NOT be a lookup (keep the high-volume write lean)`);
+  }
+});
+
 test('agentic-sdlc: every status/severity/criticality/docType enum is pinned (drift breaks documented queries)', () => {
   // DESIGN frames enum drift as a real defect — the query patterns + GTM narrative cite
   // these exact vocabularies. Silently narrowing one (dropping `deprecated`, `mitigated`,
@@ -477,6 +581,11 @@ test('agentic-sdlc: every status/severity/criticality/docType enum is pinned (dr
     ['control', 'status', ['draft', 'active', 'retired']],
     ['convention', 'status', ['active', 'retired']],
     ['gotcha', 'status', ['active', 'resolved']],
+    // `memory` (the private tier): `kind` mirrors the file-memory frontmatter
+    // vocabulary 1:1 (the documented migration target), and `status` drives the
+    // supersede lifecycle — either drifting silently would break recall/migration.
+    ['memory', 'kind', ['user', 'feedback', 'project', 'reference', 'observation']],
+    ['memory', 'status', ['active', 'superseded']],
   ];
   for (const [type, field, values] of expected) {
     assert.deepEqual(enumOf(type, field), values, `${type}.${field} enum drifted`);
@@ -489,13 +598,13 @@ test('agentic-sdlc: every schema carries exactly one range/sort date lookup (ran
   // promise — so assert each of the 9 schemas HAS exactly one, naming a date field.
   for (const s of getBlueprint('agentic-sdlc')!.schemas) {
     const ranges = (s.lookupFields ?? []).filter((lf) => typeof lf !== 'string' && lf.rangeEnabled);
-    assert.equal(ranges.length, 1, `${s.typeName} should have exactly one range/sort date lookup`);
-    const fieldName = typeof ranges[0] === 'string' ? ranges[0] : ranges[0].fieldName;
-    assert.equal(
-      s.fields.find((f) => f.fieldId === fieldName)?.fieldType,
-      'date',
-      `${s.typeName}.${fieldName} range lookup must be a date`,
+    // Every schema keeps exactly one range/sort DATE lookup (the "when"). A schema MAY carry
+    // additional non-date range lookups (e.g. memory's `priority` band) — those don't count
+    // against the date guarantee.
+    const dateRanges = ranges.filter(
+      (lf) => s.fields.find((f) => f.fieldId === (lf as { fieldName: string }).fieldName)?.fieldType === 'date',
     );
+    assert.equal(dateRanges.length, 1, `${s.typeName} should have exactly one range/sort DATE lookup (the "when")`);
   }
 });
 
@@ -616,7 +725,7 @@ test('GUARD: every seed reference resolves to an earlier seed of the right type'
       const schema = schemaByType.get(seed.typeName);
       const refFields = (schema?.fields ?? []).filter((f) => f.fieldType === 'reference');
       for (const rf of refFields) {
-        const value = seed.fields[rf.fieldId];
+        const value = seed.fields?.[rf.fieldId];
         if (value === undefined || value === null) continue; // optional references may be unset
         assert.equal(typeof value, 'string', `${b.name} seed ${seed.externalId}.${rf.fieldId} must be an externalId string`);
         const targetType = seen.get(value as string);

@@ -43,10 +43,11 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
 - `BUNDLED_BLUEPRINTS` / `BLUEPRINT_NAMES` / `getBlueprint(name)` — the
   curated library: `task-management` (the minimal authoring exemplar),
   `coding-agent-memory`, `agentic-sdlc` (a whole-SDLC system of
-  record for an AI dev team: nine schemas split by content vs structure — ADRs,
-  designs, references, runbooks, and post-mortems as **documents**; controls,
-  conventions, gotchas, and a glossary as **records** — linked into a
-  **cross-surface** knowledge graph, with hybrid search + grounded `rag_ask`; see
+  record for an AI dev team: ten schemas — nine curated (split by content vs
+  structure) — ADRs, designs, references, runbooks, and post-mortems as
+  **documents**; controls, conventions, gotchas, and a glossary as **records** —
+  linked into a **cross-surface** knowledge graph, with hybrid search + grounded
+  `rag_ask`, plus a private `memory` tier for per-principal working memory; see
   [`guides/agentic-sdlc.md`](guides/agentic-sdlc.md) and the drop-in agent prompt
   [`prompts/agentic-sdlc-agent.md`](prompts/agentic-sdlc-agent.md)),
   `second-brain`, and `clinical-intake` (the PHI/sensitive-field exemplar).
@@ -192,6 +193,13 @@ Blueprints are tested **like code**, in three layers:
 > token with authority to **create** that app-context. A token pinned to an existing
 > context can't create a new one, so the apply step will fail — bootstrap into an existing
 > context, or use a token with context-creation authority.
+
+## Security & trust
+
+Vectros enforces per-customer, fail-closed isolation and least-privilege scoped keys, with a
+tamper-evident audit and version history. Customer-facing surfaces are hardened through extensive
+adversarial security review. For the full trust posture, drawn plainly with its boundaries, see the
+[compliance and trust guide](https://docs.vectros.ai/guides/operations-trust/compliance).
 
 ## License
 

@@ -1,13 +1,15 @@
 # Guide — the `agentic-sdlc` blueprint
 
 `agentic-sdlc` is a bundled blueprint: a **whole-SDLC system of record**
-for an AI development team. It provisions **nine schemas, split by content vs
-structure** — `decision` (ADRs), `design`, `reference`, `runbook`, and
-`postmortem` as **documents** (the markdown body is the artifact); `control`,
-`convention`, `gotcha`, and `term` (glossary) as **records** (the typed fields are
-the artifact) — linked into a **cross-surface knowledge graph** and recalled by
-hybrid search + grounded `rag_ask`. This guide takes you from bootstrap to a
-populated, queryable KB, and to wiring an agent to use it day-to-day.
+for an AI development team. It provisions **ten schemas**: nine curated ones
+split by content vs structure — `decision` (ADRs), `design`, `reference`,
+`runbook`, and `postmortem` as **documents** (the markdown body is the artifact);
+`control`, `convention`, `gotcha`, and `term` (glossary) as **records** (the typed
+fields are the artifact) — linked into a **cross-surface knowledge graph** and
+recalled by hybrid search + grounded `rag_ask`, plus a private **`memory`** tier
+(§8) for the per-principal working memory an agent keeps for itself. This guide
+takes you from bootstrap to a populated, queryable KB, and to wiring an agent to
+use it day-to-day.
 
 > Companion: [`prompts/agentic-sdlc-agent.md`](../prompts/agentic-sdlc-agent.md) —
 > the drop-in agent orientation prompt (the recall-before-acting / capture-after
@@ -16,10 +18,12 @@ populated, queryable KB, and to wiring an agent to use it day-to-day.
 
 ## 1. What you get
 
-- **9 schemas, content vs structure.** The prose artifacts — `decision` (ADR),
-  `design`, `reference`, `runbook`, `postmortem` — are **documents** (the markdown
-  body is searched + answered over). The structured artifacts — `control`,
-  `convention`, `gotcha`, `term` — are **records** (typed fields, exact-queryable).
+- **10 schemas — 9 curated (content vs structure) + a private `memory` tier.** The
+  prose artifacts — `decision` (ADR), `design`, `reference`, `runbook`, `postmortem`
+  — are **documents** (the markdown body is searched + answered over). The structured
+  artifacts — `control`, `convention`, `gotcha`, `term` — are **records** (typed
+  fields, exact-queryable). The tenth, **`memory`** (§8), is a per-principal private
+  record type — an agent's own working memory, isolated by the `member` role.
   Every item has a stable `externalId`, so re-ingesting never duplicates: an
   unchanged item is returned as-is, and re-ingesting **edited** source with
   `upsert: true` overwrites it in place — the KB is *rebuildable* and *syncable*.
@@ -43,7 +47,7 @@ populated, queryable KB, and to wiring an agent to use it day-to-day.
 
 ## 2. Quickstart — install, sign in, provision
 
-Install the public CLI, sign in once (browser), and provision the context + the nine
+Install the public CLI, sign in once (browser), and provision the context + the ten
 schemas + a scoped key (and wire your MCP client). `production` is the default
 environment — add `--env staging` only to target staging.
 
@@ -104,7 +108,7 @@ agent only archives); bind it to your user two ways:
 
 ### Seeds
 
-This blueprint ships **without bundled seeds** — it provisions the nine schemas +
+This blueprint ships **without bundled seeds** — it provisions the ten schemas +
 the scoped key, and you fill it from your own corpus (next section). So the context
 starts clean; there's no synthetic data to remove. (If you fork a blueprint that
 *does* ship seeds and want a clean production context, `vectros bootstrap
@@ -171,16 +175,20 @@ pauses or restarts simply converges — it never double-writes.
 ## 4. Query it
 
 Reach for the most precise tool first: `record_query` for anything *enumerable*
-(exact, cheap, compact), `hybrid_search` to recall by meaning when you don't know
-the exact filter, `rag_ask` for a grounded *answer* over document bodies. Scope by
-type per tool: `hybrid_search` uses `typeName` (which narrows documents and records
-alike), `record_query` uses its `type` argument.
+(exact, cheap, compact), then `hybrid_search` to recall by meaning when you don't
+know the exact filter — and reason over the returned passages yourself. `rag_ask`
+layers a grounded, cited *answer* over document bodies on top, but it consumes
+inference balance and may be unavailable on the free tier, so don't make recall
+*depend* on it. Scope by type per tool: `hybrid_search` uses `typeName` (which
+narrows documents and records alike), `record_query` uses its `type` argument.
 
 Two `hybrid_search` gotchas worth knowing up front: hits carry the surrounding
 passage, so searches are *heavy* — start `limit:3` + `uniqueDocuments:true` and
-escalate only if needed; and the default `mode:HYBRID` uses `textMode:PHRASE`, so a
-long natural-language query can contribute nothing on the keyword leg (a `textScore`
-of `0` on every hit is the tell) — use a short keyword phrase or `textMode:"OR"`.
+escalate only if needed; and the default `mode:HYBRID` uses `textMode:PHRASE`, so
+ask in **natural language, not keywords** — a full-sentence question rides the
+semantic leg, and a `textScore` of `0` on the keyword leg is **expected and fine**
+(not a failure to fix). Don't shrink to keywords; add `textMode:"OR"` only when you
+also want an exact term/id hit.
 
 | You want… | Call |
 |---|---|
@@ -192,7 +200,80 @@ of `0` on every hit is the tell) — use a short keyword phrase or `textMode:"OR
 | "Latest decisions / search the designs" | `hybrid_search "<topic>" contentTypes:["documents"], typeName:"decision"` (or `"design"`, plus `filters:{ area:"<area>" }`) |
 | "What supersedes a given decision?" | document lookup on `decision` by `supersedes:"<externalId>"` |
 
-## 5. Customize
+## 5. Agent memory — the shared KB plus private memory
+
+The curated types above are the team's **crystallized** knowledge. The `memory`
+type is the **working** layer around it, in two ownership tiers — governed by
+the platform, never by an app-enforced field:
+
+| Tier | Who reads it | Who writes it | Write it with |
+|---|---|---|---|
+| **Curated KB** (the types above) | every member (read + semantic recall) | the service key / `editor` | normal ingest |
+| **Private memory** | its owner (+ context admins, see the caveat below) | its owner | `record_create memory …` |
+
+Enroll a person (or their agent) in one step:
+
+```bash
+vectros join agentic-sdlc --role member
+```
+
+`join` grants the `member` role, issues a key, and stores it in the local
+keyring (`vectros switch` flips between identities). A member reads and
+semantically recalls the whole curated KB, and gets a **private** memory store
+that only they can see: with no shared scope on their key, every `memory` record
+they write is owned by them alone.
+
+> **Keep private data in `memory` (a record), not a document.** The per-principal
+> fence is on the `memory` *record* type; the member role's read of the curated
+> **documents** is context-wide (unscoped). This blueprint never creates private
+> documents, so there is nothing to leak today — but if you extend it, don't put
+> private content in a `scopes:[]` document: a member's unscoped `documents:r`
+> would read it. Private working data belongs in `memory`.
+
+**What goes in memory.** Private memory is your agent's working layer: episodic
+session scratch, low-confidence observations being staged, personal notes across
+sessions. A memory *matures by promotion* — when a private note proves durable,
+crystallize it into a `convention`/`gotcha`/`decision` (a curated type the whole
+team reads). One rule keeps memory honest: **your issue tracker owns work-item
+status; memory owns the context around it** — don't let memory become a shadow
+task board.
+
+> **Coming next — team working memory.** A third tier (the same `memory` type
+> shared at a group scope, so teammates' agents read and write a common working
+> layer) is a planned addition. It is intentionally not in this version while the
+> platform's ownership axis for shared scopes is being finalized — so this
+> blueprint doesn't bake a shape that is about to change. When it lands, it's the
+> same `memory` type with a shared write scope, not a new schema.
+
+**Structure axes** on every memory: `kind` (`user`/`feedback`/`project`/
+`reference`/`observation`), `area` (the same vocabulary as the curated types),
+`agent` (the *role* that wrote it — `pm`, `builder`, `reviewer` — not an
+instance id), and `threadId` (your runtime's conversation/session id, for
+episodic slices). Isolation lives at the *principal* boundary; sessions and
+roles of the same person are distinguished by these fields, not by credentials.
+
+**How the role composes — worth understanding.** Within one clause every
+`dataScope` dimension must match (**AND**); a role's clauses combine as a
+**union** (any clause grants). The `member` role is two clauses: the curated KB
+(type-scoped away from `memory`, so its semantic recall admits only curated
+content — never anyone's private memory) and private memory (`${{ self.userId }}`
+— your own only). Check any binding before relying on it:
+
+```bash
+vectros access explain --principal me --context agentic-sdlc
+```
+
+which prints the clauses plus a concrete who-can-see-what matrix.
+
+**One caveat to state plainly:** two context-level principals can see members'
+private memory — the **`editor`** role (deliberately unscoped, like any system
+administrator) and the **service key** (its access profile is context-wide so
+the ingest agent can curate everything). "Private" means *private from other
+members*, not from the context's administrators — the same trust model as your
+email or file-share admins. Scope either down in your fork if that tradeoff
+isn't right for your deployment.
+
+## 6. Customize
 
 This is a starting point — fork it for your org:
 
@@ -213,7 +294,7 @@ This is a starting point — fork it for your org:
   marks nothing sensitive; if a field needs redaction (e.g. an internal endpoint in
   a post-mortem), mark it `sensitive` (see the `clinical-intake` blueprint).
 
-## 6. Bridging your issue tracker — don't mirror it
+## 7. Bridging your issue tracker — don't mirror it
 
 Your issue tracker (GitLab, Jira, Linear) and this knowledge base are **two planes
 with different jobs** — keep them separate:
@@ -242,7 +323,7 @@ tracker chatter. The KB never stores status (no open/closed/assignee): status li
 in the tracker, knowledge lives here, and the tag + back-ref are the seam. (No schema
 change — every type already has `tags`.)
 
-## 7. Keep it healthy
+## 8. Keep it healthy
 
 - **Record the why** — rationale is the most-recalled field; a statement without it
   is a log entry, not knowledge.

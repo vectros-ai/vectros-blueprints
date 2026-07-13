@@ -3,6 +3,58 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.7.0
+
+### Added
+
+- **`agentic-sdlc` gains governed agent memory** (blueprint `1.3.0 → 1.6.0`).
+  Alongside the team's shared, curated knowledge (decisions, conventions,
+  gotchas, …) — the *crystallized* tier — agents and the humans they work for
+  now have a **private** working-memory layer, enforced by the platform rather
+  than by application code:
+  - **The `memory` record type** — a flexible schema for working memory: `kind`
+    (`user`/`feedback`/`project`/`reference`/`observation`), a searchable
+    `body`, `area` (the same subsystem vocabulary as the curated types, so one
+    filter narrows recall across all content), `agent` (the *role* that wrote
+    it — `pm`, `builder`, … — not an instance id), `tags`, a supersede
+    `status`, an optional `threadId` (your runtime's conversation/session id,
+    for episodic slices), a range-queryable `updatedOn`, and `externalId` as
+    the stable slug. It also carries a **`priority`** band (a range-queryable
+    number, nullable — `0`/`10`/`20`/`30`) for the always-load pinned set and
+    recall ranking, and three graph edges: `supersededBy`/`relatedTo` (self-refs
+    for the evolution + see-also trail) and a `sourceRef` provenance string.
+    Because `memory` is the highest-volume record, its lookups are kept **lean** —
+    only the fields you enumerate deterministically (`kind`, `threadId`,
+    `updatedOn` range, `priority` range) are lookup-indexed; `area`/`agent`/
+    `status` are `filterable` search metadata (no per-write lookup row), and
+    `priority`/`threadId` write a row only when set.
+  - **The `member` role** — two unioned clauses: the curated shared KB (read
+    *and* semantic recall, type-scoped so recall can never expose anyone's
+    memory) and **private memory** (the member's own, isolated by a
+    `${{ self.userId }}` data-scope — visible only to them, and both
+    hybrid-searchable *and* `rag_ask`-groundable by its owner alone). Enroll a person or
+    agent in one step with `vectros join agentic-sdlc --role member`; verify a
+    binding with `vectros access explain`. (Team-shared working memory — the same
+    `memory` type at a group scope — is a planned addition, deferred while the
+    shared-scope ownership axis is finalized.)
+  - **The bundled guide and agent orientation prompt** gain agent memory: the
+    guide's "Agent memory" section (what belongs in memory, the promotion lifecycle
+    private → curated, the "your issue tracker owns status; memory owns context"
+    rule, the AND-vs-union access model, the `vectros access explain` check, and the
+    context-administrator visibility caveat), and the prompt now lists the `memory`
+    type and names the private tier as working memory's first-class home. The
+    orientation prompt was also slimmed (~220 → ~120 lines) into an operating layer —
+    the recall→act→capture loop plus the query/capture disciplines — that points to
+    the guide for the exhaustive field lists, payload shapes, and sync markers rather
+    than restating them. Recall guidance now leads with `hybrid_search` +
+    natural-language queries (reason over the passages yourself; `rag_ask` is an
+    optional, inference-metered layer), correcting the prior keyword-first advice.
+- **Blueprint format: `accessProfile.identityOverrides` and seed `scopes`.** An
+  `accessProfile` may declare identity overrides — the scope values its key
+  stamps onto everything it writes — and a seed may declare its `scopes`
+  ownership (`[]` = a private, user-owned item). `${{ identities.* }}` tokens
+  substitute in both at apply time; `bootstrap` and `blueprint-test` apply them.
+
 ## 0.6.5 — 2026-07-04
 
 ### Fixed

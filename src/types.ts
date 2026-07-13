@@ -21,9 +21,9 @@ import { z } from 'zod';
 // lowercase letter, then lowercase letters/digits/dashes).
 const CONTEXT_ID_RE = /^[a-z][a-z0-9-]{2,30}$/;
 
-// Field-level validation rules — mirrors the platform `ValidationRules`
-// (platform/common-core/.../template/ValidationRules.java). Passed straight
-// through to `SchemaRequest.FieldDef.validation` so the backend enforces them.
+// Field-level validation rules — mirrors the platform's field-validation
+// vocabulary. Passed straight through to the schema request so the backend
+// enforces them.
 // `.strict()` so an unknown rule key is a clear authoring error, not a silent
 // no-op (the platform tolerates extra keys, but our format should teach).
 const ValidationRulesSchema = z
@@ -202,6 +202,13 @@ const BlueprintAccessProfileSchema = z
     // "org_x's records AND tenant-shared records". Omitting null restricts to
     // the listed owners ONLY (the key will NOT see tenant-level/seed records).
     dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    // Optional identity overrides for the service principal's profile — scope
+    // values its key STAMPS onto everything it writes (a credential can only
+    // stamp ownership its identity carries). Keys: `orgId`/`clientId` (or the
+    // namespaced `scope:<ns>` form); values may be `${{ identities.* }}` tokens
+    // (substituted at apply time). e.g. `{ orgId: '${{ identities.team }}' }`
+    // makes every record the service key writes org/team-owned.
+    identityOverrides: z.record(z.string().min(1)).optional(),
   })
   .strict();
 
@@ -274,6 +281,13 @@ const SeedCommonShape = {
    * reference a document seed by its externalId, and vice versa).
    */
   externalId: z.string().min(1),
+  /**
+   * Optional scope ownership for the seeded item, as `namespace:value` entries
+   * (≤2, e.g. `['org:${{ identities.team }}']`; tokens substitute at apply
+   * time). `[]` = a private, user-owned item. Omitted = the seeding
+   * credential's full identity (the default).
+   */
+  scopes: z.array(z.string()).optional(),
 } as const;
 
 const RecordSeedSchema = z
