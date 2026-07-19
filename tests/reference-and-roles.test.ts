@@ -77,9 +77,18 @@ test('reference: REJECTS a reference field missing targetSurface (platform requi
   );
 });
 
-test('reference: REJECTS an invalid targetSurface value (strict enum)', () => {
+test('reference: ACCEPTS a custom-namespace targetSurface (data-driven, not a closed enum)', () => {
+  // Namespaces are tenant-defined at runtime, so targetSurface is a free string;
+  // the platform existence-checks it at authoring. A namespace-shaped value parses.
+  const bp = parseBlueprint(
+    withField({ fieldType: 'reference', targetTypeName: 'team', targetSurface: 'team' }),
+  );
+  assert.equal(bp.schemas[0].fields[0].targetSurface, 'team');
+});
+
+test('reference: REJECTS targetSurface: "entity" (names the bind surface, not a target)', () => {
   const paths = issuePaths(
-    withField({ fieldType: 'reference', targetTypeName: 'project', targetSurface: 'galaxy' }),
+    withField({ fieldType: 'reference', targetTypeName: 'project', targetSurface: 'entity' }),
   );
   assert.ok(
     paths.some((p) => p.includes('targetSurface')),
@@ -107,13 +116,13 @@ test('roles: accepts a multi-clause role map (clauses with allowedActions + data
       roles: {
         member: [
           { allowedActions: ['records:cru:task'], dataScope: { userId: ['u_1'] } },
-          { allowedActions: ['records:r:task'], dataScope: { orgId: ['org_1', null] } },
+          { allowedActions: ['records:r:task'], dataScope: { 'scope:org': ['org_1', null] } },
         ],
       },
     } as Partial<Blueprint>),
   );
   assert.equal(bp.roles?.member.length, 2);
-  assert.deepEqual(bp.roles?.member[1].dataScope?.orgId, ['org_1', null]);
+  assert.deepEqual(bp.roles?.member[1].dataScope?.['scope:org'], ['org_1', null]);
 });
 
 test('roles: REJECTS a role with no clauses (empty array)', () => {

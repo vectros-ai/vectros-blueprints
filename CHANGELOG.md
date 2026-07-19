@@ -3,6 +3,25 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.8.0
+
+### Changed (breaking)
+
+- **Organization and client ownership is now expressed as namespaced scopes.**
+  `org` and `client` are built-in namespaces alongside any you define (teams,
+  projects, tenants, …), so ownership is authored the same way everywhere:
+  - Schema ownership: the `orgId` / `clientId` fields are replaced by a single
+    `scopes` array of `namespace:value` entries — e.g. `scopes: ["org:<id>"]`.
+    `userId` is unchanged.
+  - `allowedSurfaces`: `org` / `client` are replaced by `entity` (a schema binds
+    to identity entities of any namespace).
+  - Reference `targetSurface`: now `record`, `document`, `user`, or a namespace
+    (`org`, `client`, or one you define); `entity` is not a valid target.
+  - `dataScope` / `identityOverrides` keys use the `scope:<namespace>` form
+    (`scope:org`, `scope:client`, …); the bare `orgId` / `clientId` keys are gone.
+  - A declared identity's `kind` is `user` or a namespace (`org`, `client`, or
+    one you define).
+
 ## 0.7.0
 
 ### Added

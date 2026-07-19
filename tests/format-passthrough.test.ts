@@ -138,17 +138,17 @@ test('rejects a renderHints widget outside the allowed enum (strict)', () => {
   );
 });
 
-test('accepts schema-level capabilities + active + flat ownership (passthrough)', () => {
+test('accepts schema-level capabilities + active + scope ownership (passthrough)', () => {
   const bp = parseBlueprint(
     withSchema({
       capabilities: { auditHistory: false },
       active: true,
-      orgId: 'org_acme',
+      scopes: ['org:org_acme'],
     }),
   );
   assert.equal(bp.schemas[0].capabilities?.auditHistory, false);
   assert.equal(bp.schemas[0].active, true);
-  assert.equal(bp.schemas[0].orgId, 'org_acme');
+  assert.deepEqual(bp.schemas[0].scopes, ['org:org_acme']);
 });
 
 test('rejects an unknown capabilities key (strict)', () => {
@@ -209,8 +209,7 @@ test('BACK-COMPAT: a v1-flat blueprint (string lookupFields, no new fields) stil
   assert.equal(bp.schemas[0].capabilities, undefined);
   assert.equal(bp.schemas[0].active, undefined);
   assert.equal(bp.schemas[0].userId, undefined);
-  assert.equal(bp.schemas[0].orgId, undefined);
-  assert.equal(bp.schemas[0].clientId, undefined);
+  assert.equal(bp.schemas[0].scopes, undefined);
 });
 
 test('rejects an unknown top-level schema key (strict)', () => {

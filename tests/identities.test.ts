@@ -102,15 +102,27 @@ test('REJECTS a token that references an undeclared identity', async () => {
   );
 });
 
-test('REJECTS a malformed identities block (bad kind)', async () => {
+test('REJECTS a malformed identities block (reserved surface name as kind)', async () => {
+  // kind is 'user' or an entity namespace (data-driven, not a closed
+  // enum) — but a reserved surface word ('entity'/'record'/'document') can never
+  // be a namespace and is rejected.
   await assert.rejects(
     () =>
       resolveBlueprintIdentities(
-        doc({ identities: { owner: { kind: 'robot', externalId: 'u-1' } } }),
+        doc({ identities: { owner: { kind: 'entity', externalId: 'u-1' } } }),
         fakeResolver(),
       ),
     BlueprintIdentityError,
   );
+});
+
+test('ACCEPTS a custom-namespace kind — org/client generalize to any namespace', async () => {
+  const resolved = (await resolveBlueprintIdentities(
+    doc({ identities: { squad: { kind: 'team', externalId: 't-1' } }, description: '${{ identities.squad }}' }),
+    fakeResolver(),
+  )) as { description?: string };
+  // fakeResolver substitutes a deterministic id; the token resolves rather than erroring.
+  assert.ok(resolved.description && !resolved.description.includes('${{'), 'custom-namespace identity token resolved');
 });
 
 test('surfaces a resolver failure as BlueprintIdentityError (teach-by-error)', async () => {

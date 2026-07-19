@@ -93,8 +93,13 @@ const BlueprintFieldDefSchema = z
     targetField: z.string().min(1).optional(),
     // Which surface the target lives on. REQUIRED on a reference field: the same
     // typeName can exist on more than one surface, so this disambiguates which
-    // lookup resolves the link (SchemaRequest.FieldDef.targetSurface).
-    targetSurface: z.enum(['record', 'document', 'user', 'org', 'client']).optional(),
+    // lookup resolves the link (SchemaRequest.FieldDef.targetSurface). A fixed
+    // surface (`record`/`document`/`user`) OR an entity-backed namespace
+    // (`org`/`client`, or one you registered). The value set is
+    // data-driven (namespaces are tenant-defined at runtime), so this is a free
+    // string, not a closed enum; the platform existence-checks it at authoring.
+    // `entity` is NOT a target — it names the bind surface, not a location.
+    targetSurface: z.string().min(1).optional(),
     cardinality: z.enum(['one', 'many']).optional(),
   })
   .strict()
@@ -117,7 +122,18 @@ const BlueprintFieldDefSchema = z
         code: z.ZodIssueCode.custom,
         path: ['targetSurface'],
         message:
-          "a 'reference' field requires 'targetSurface' (which surface the target lives on: record | document | user | org | client)",
+          "a 'reference' field requires 'targetSurface' (which surface the target lives on: 'record', 'document', 'user', or an entity-backed namespace such as 'org', 'client', or one you registered)",
+      });
+    }
+    // `entity` names the schema BIND surface (see allowedSurfaces), never a reference
+    // TARGET — a target names a location, and every entity lives in a namespace. Reject
+    // it here with a pointed error rather than let the platform 400 every write later.
+    if (isReference && field.targetSurface === 'entity') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['targetSurface'],
+        message:
+          "'entity' is not a reference target — name the entity's namespace instead (e.g. 'org', 'client', or a namespace you registered)",
       });
     }
     if (!isReference && hasRefKeys) {
@@ -173,17 +189,22 @@ const BlueprintSchemaSchema = z
     // Which typed surfaces may bind this schema. REQUIRED + non-empty on
     // the platform `SchemaRequest` (0.23+); the loader defaults it to ['record']
     // when a blueprint omits it (blueprints provision record types + seed records).
-    allowedSurfaces: z.array(z.enum(['record', 'document', 'user', 'org', 'client'])).min(1).optional(),
+    // The org/client bind surfaces fold into the single `entity`
+    // surface — a schema binds to entities of ANY namespace via `entity` plus the
+    // entity's own `schemaId` (the namespace is the entity's, not the schema's).
+    allowedSurfaces: z.array(z.enum(['record', 'document', 'user', 'entity'])).min(1).optional(),
     // NEW (format passthrough) — mirror the platform `SchemaRequest` shape 1:1.
     capabilities: BlueprintCapabilitiesSchema.optional(),
     // Whether the schema is active; inactive schemas reject new record creation.
     active: z.boolean().optional(),
-    // Schema-level ownership defaults — flat, matching `SchemaRequest`
-    // userId/orgId/clientId. With a scoped token these must be consistent with
-    // the profile's dataScope (a cross-consistency lint is deferred to the lint slice).
+    // Schema-level ownership defaults, matching `SchemaRequest`: the principal
+    // `userId` plus `scopes` — namespaced parent edges as `<namespace>:<value>`
+    // (`org:...`, `client:...`, or a namespace you registered), at most two
+    // namespaces. The flat `orgId`/`clientId` fields fold into `scopes`.
+    // With a scoped token these must be consistent with the profile's dataScope
+    // (a cross-consistency lint is deferred to the lint slice).
     userId: z.string().min(1).optional(),
-    orgId: z.string().min(1).optional(),
-    clientId: z.string().min(1).optional(),
+    scopes: z.array(z.string().min(1)).max(2).optional(),
   })
   .strict();
 
@@ -192,21 +213,25 @@ const BlueprintAccessProfileSchema = z
     // Validated structurally here; the SCOPE GATE (in @vectros-ai/cli) is
     // what enforces the data-plane-only security boundary.
     allowedActions: z.array(z.string().min(1)).min(1),
-    // Optional ownership binding: { userId: [...], orgId: [...], clientId: [...] }.
+    // Optional ownership binding: { userId: [...], "scope:org": [...], "scope:client": [...] }.
     // A `null` element in a value list is the documented NULL SENTINEL — it
     // grants access to TENANT-LEVEL (owner-less) records IN ADDITION to the
     // listed owner ids. `null` is the literal matched value: a tenant-level
     // record has a genuinely-null ownership field, and the platform's scope
     // matcher tests `allowedValues.contains(null)` against the tenant-level
-    // null sentinel (+ ScopeClause). e.g. `{ orgId: ["org_x", null] }` =
-    // "org_x's records AND tenant-shared records". Omitting null restricts to
-    // the listed owners ONLY (the key will NOT see tenant-level/seed records).
+    // null sentinel (+ ScopeClause). Keys are `userId` (the principal) plus
+    // namespaced `scope:<ns>` scopes (`scope:org`, `scope:client`, `scope:group`,
+    // ...) — the flat `orgId`/`clientId` keys are gone. e.g.
+    // `{ "scope:org": ["org_x", null] }` = "org_x's records AND tenant-shared
+    // records". Omitting null restricts to the listed owners ONLY (the key will
+    // NOT see tenant-level/seed records).
     dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
     // Optional identity overrides for the service principal's profile — scope
     // values its key STAMPS onto everything it writes (a credential can only
-    // stamp ownership its identity carries). Keys: `orgId`/`clientId` (or the
-    // namespaced `scope:<ns>` form); values may be `${{ identities.* }}` tokens
-    // (substituted at apply time). e.g. `{ orgId: '${{ identities.team }}' }`
+    // stamp ownership its identity carries). Keys are the namespaced `scope:<ns>`
+    // form (`scope:org`, `scope:client`, or a namespace you registered; the bare
+    // `orgId`/`clientId` keys are gone); values may be `${{ identities.* }}`
+    // tokens (substituted at apply time). e.g. `{ "scope:org": '${{ identities.team }}' }`
     // makes every record the service key writes org/team-owned.
     identityOverrides: z.record(z.string().min(1)).optional(),
   })
@@ -233,6 +258,32 @@ const BlueprintRoleClauseSchema = z
 // reusable, multi-clause rules (architecture §6).
 const BlueprintRolesSchema = z.record(z.array(BlueprintRoleClauseSchema).min(1));
 
+// A namespace name: a lowercase letter first, then lowercase letters,
+// digits, `_` or `-`, 2-32 chars — mirrors the platform `IdentityNamespaceDB`
+// grammar. The fixed surfaces are not namespaces and can never be entity kinds.
+const IDENTITY_NAMESPACE_RE = /^[a-z][a-z0-9_-]{1,31}$/;
+const FORBIDDEN_IDENTITY_NAMESPACES = new Set(['record', 'document', 'entity', 'user']);
+
+// A declared identity's `kind`: the fixed `user` surface, OR an entity namespace
+// (`org`/`client` — built-in — or one you registered). Orgs and clients fold into
+// the generic identity-entity model, so the closed `user|org|client`
+// enum generalizes to any entity-backed namespace. `user` is the one fixed surface
+// that is not a namespace; the reserved surface words are rejected as kinds.
+const IdentityKindSchema = z.string().min(1).superRefine((val, ctx) => {
+  if (val === 'user') return; // the fixed principal surface (createUser)
+  if (!IDENTITY_NAMESPACE_RE.test(val)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `kind must be 'user' or an entity namespace (2-32 chars, a lowercase letter first, then lowercase letters/digits/_/-), e.g. 'org', 'client', 'team'`,
+    });
+  } else if (FORBIDDEN_IDENTITY_NAMESPACES.has(val)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `'${val}' is a reserved surface name and cannot be an entity namespace — use 'user' for a user, or a namespace like 'org'/'client'/'team'`,
+    });
+  }
+});
+
 // A declared identity — a principal the blueprint expects to exist, ensured
 // (idempotently, by externalId) at APPLY time by a creds-bearing pass (the CLI
 // install orchestrator). Referenced elsewhere via `${{ identities.<name> }}`,
@@ -241,7 +292,7 @@ const BlueprintRolesSchema = z.record(z.array(BlueprintRoleClauseSchema).min(1))
 // (resolveBlueprintIdentities) lives in identities.ts.
 const IdentityDeclSchema = z
   .object({
-    kind: z.enum(['user', 'org', 'client']),
+    kind: IdentityKindSchema,
     externalId: z.string().min(1),
     displayName: z.string().min(1).optional(),
     metadata: z.record(z.unknown()).optional(),

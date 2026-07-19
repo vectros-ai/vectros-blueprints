@@ -107,14 +107,16 @@ A schema additionally accepts:
   platform when omitted. Surface it to make the audit posture self-documenting.
 - **`active`** — whether the schema accepts new records (inactive schemas reject
   creation). Defaults to active.
-- **`userId` / `orgId` / `clientId`** — schema-level ownership defaults (flat,
-  mirroring the platform `SchemaRequest`). With a scoped token these must be
+- **`userId` / `scopes`** — schema-level ownership defaults, mirroring the
+  platform `SchemaRequest`: the principal `userId` plus `scopes`, namespaced
+  parent edges as `<namespace>:<value>` (`org:...`, `client:...`, or a namespace
+  you registered — at most two namespaces). With a scoped token these must be
   consistent with the profile's `dataScope`.
 
 The `accessProfile.dataScope` value lists accept a **`null` sentinel** — e.g.
-`{ orgId: ["org_x", null] }` grants `org_x`'s records **plus** tenant-level
+`{ "scope:org": ["org_x", null] }` grants `org_x`'s records **plus** tenant-level
 (owner-less / shared) records. Omitting `null` restricts the key to the listed
-owners only.
+owners only. Keys are `userId` (the principal) plus namespaced `scope:<ns>` scopes.
 
 A blueprint may also declare top-level **`roles`** — a map of `roleId` → ordered
 scope clauses (each an `allowedActions` list with an optional `dataScope`). Unlike
@@ -148,10 +150,12 @@ allowlist guard so this fails at PR time, not on apply.
 link to another record. The blueprint format carries these extra authoring keys:
 
 - `targetTypeName` (**required**) — the `typeName` the link points at.
-- `targetSurface` (**required**) — which surface the target lives on
-  (`record` | `document` | `user` | `org` | `client`). The same `typeName` can exist on
-  more than one surface, so this disambiguates which lookup resolves the link. (Omitting
-  it 400s at `createSchema` — "requires targetSurface".)
+- `targetSurface` (**required**) — which surface the target lives on: a fixed
+  surface (`record` | `document` | `user`) or an entity-backed **namespace**
+  (`org`, `client`, or one you registered). The same `typeName` can exist on more
+  than one surface, so this disambiguates which lookup resolves the link. The value
+  set is data-driven (namespaces are tenant-defined), so it is a free string, not a
+  closed enum. (Omitting it 400s at `createSchema` — "requires targetSurface".)
 - `targetField` (optional) — the field on the target used to resolve the link; defaults
   (platform side) to the target's `externalId` / lookup key when omitted. Must name a
   **unique** lookup on the target type.

@@ -775,7 +775,10 @@ test('GUARD: every reference targets a declared schema whose surface includes ta
           target !== undefined,
           `${b.name}.${s.typeName}.${f.fieldId}: targetTypeName '${f.targetTypeName}' is not a declared schema`,
         );
-        const targetSurfaces = target!.allowedSurfaces ?? ['record']; // default surface is record
+        // targetSurface is a free string (a fixed surface OR an entity namespace,
+        // data-driven), while allowedSurfaces is the closed bind-surface enum — widen
+        // to string[] for the membership check (the bundled edges are all record/document).
+        const targetSurfaces: string[] = target!.allowedSurfaces ?? ['record']; // default surface is record
         const declared = f.targetSurface ?? 'record';
         assert.ok(
           targetSurfaces.includes(declared),

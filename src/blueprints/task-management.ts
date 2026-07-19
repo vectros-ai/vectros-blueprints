@@ -121,8 +121,8 @@ const taskManagement: Blueprint = {
   // r/c/u + search + schema discovery. NOT records:d (least privilege).
   accessProfile: {
     allowedActions: ['records:r', 'records:c', 'records:u', 'search:r', 'schemas:r'],
-    // dataScope omitted → tenant-level shared tracker. Bind to an orgId
-    // for per-org isolation.
+    // dataScope omitted → tenant-level shared tracker. Add a `scope:org`
+    // entry for per-org isolation.
   },
 
   servicePrincipal: {
