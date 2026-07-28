@@ -3,6 +3,16 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.9.0
+
+### Added
+
+- **`BlueprintSchemaSchema` gains `basedOn`.** A schema entry may declare
+  `basedOn: <schemaId>` to mark itself as a customization of an existing
+  same-`typeName` schema in the context, mirroring the platform's schema-create
+  `basedOn` field (immutable once set, must point directly at the base).
+  Optional and additive — no bundled blueprint sets it today.
+
 ## 0.8.0
 
 ### Changed (breaking)

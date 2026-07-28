@@ -112,6 +112,15 @@ A schema additionally accepts:
   parent edges as `<namespace>:<value>` (`org:...`, `client:...`, or a namespace
   you registered — at most two namespaces). With a scoped token these must be
   consistent with the profile's `dataScope`.
+- **`basedOn`** — id of an existing schema this one *customizes*, mirroring the
+  platform's `basedOn` schema field. Required when a schema named `typeName`
+  already exists in this context under a **different** owner (a create that
+  omits it in that case is rejected with a `400`); omit when this is the first
+  schema under that name (it becomes that name's shared base, and must then be
+  ownerless — no `userId`/`scopes`). Points directly at the base (one hop) and
+  is immutable once set. The bundled loader's own re-apply of the *same*
+  blueprint never needs this — it reconciles server-side by owner — this field
+  is for a schema that intentionally customizes a base another owner defined.
 
 The `accessProfile.dataScope` value lists accept a **`null` sentinel** — e.g.
 `{ "scope:org": ["org_x", null] }` grants `org_x`'s records **plus** tenant-level

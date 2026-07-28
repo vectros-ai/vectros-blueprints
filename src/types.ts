@@ -205,6 +205,13 @@ const BlueprintSchemaSchema = z
     // (a cross-consistency lint is deferred to the lint slice).
     userId: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).max(2).optional(),
+    // The id of an existing schema this one is a CUSTOMIZATION of, when a schema
+    // named `typeName` already exists in this context — required in that case,
+    // and must be omitted when this create is the first schema under that name
+    // (it becomes that name's shared base). Must point directly at the base (one
+    // hop); immutable once set. Mirrors the `basedOn` field on the platform's
+    // schema-create request.
+    basedOn: z.string().min(1).optional(),
   })
   .strict();
 
