@@ -148,26 +148,74 @@ const BlueprintFieldDefSchema = z
 
 // A lookup field is either a bare field name (back-compat) or an object form
 // that can additionally declare a uniqueness constraint, an ordered range/prefix
-// index, an exact-match sort key, or an opt-in past the fast-index budget. The
-// loader normalizes both to the partner-API `LookupDef` shape ([SV5]).
+// index, an exact-match sort key, an opt-in past the fast-index budget, or —
+// the composite (conjunctive) form — several fields matched together at once.
+// The loader normalizes all three to the partner-API `LookupDef` shape ([SV5]).
 const BlueprintLookupFieldSchema = z.union([
   z.string().min(1),
   z
     .object({
-      fieldName: z.string().min(1),
+      // A lookup field declares either ONE field (fieldName) or 2-3 fields
+      // matched together (fieldNames) — never both, never neither. `.strict()`
+      // below only rejects unknown KEYS; it does not enforce this combination,
+      // so the `.superRefine()` after it carries the actual rule.
+      fieldName: z.string().min(1).optional(),
+      // Composite (conjunctive) lookup: match on all of these fields at once —
+      // "every record where `status` is `open` AND `area` is `billing`", exact,
+      // in a stable order. Order is significant and locked at create: a query
+      // may match a leading run of the list (the first field alone, the first
+      // two together, …) but never a later field alone — declare a separate
+      // lookup for that. Record-only: the schema's `allowedSurfaces` must be
+      // exactly `['record']` (checked at the schema level below) — the
+      // platform's composite index has no document/user/entity reader yet.
+      fieldNames: z.array(z.string().min(1)).min(2).max(3).optional(),
+      // Not available on a composite (`fieldNames`) lookup — checked below.
       unique: z.boolean().optional(),
       // Opt this field into ordered range + prefix lookups (from/to/prefix) on
       // top of exact match. Billed at the range-index rate; not valid on a
-      // sensitive field (a blind index is not orderable). Locked at create.
+      // sensitive field (a blind index is not orderable), and — like `unique`
+      // — not available on a composite lookup: it is an exact-match index over
+      // its fields; declare the range lookup separately. Locked at create.
       rangeEnabled: z.boolean().optional(),
       // Sort key for the exact-match index: 'createdAt' (default), 'lastUpdated',
-      // or a declared field on this schema. Locked at create.
+      // or a declared field on this schema. Locked at create. Valid on a
+      // composite lookup too — it orders WITHIN a group when a query supplies
+      // fewer values than the lookup declares, not across the whole result.
       sortBy: z.string().min(1).optional(),
       // Opt a field past the fixed fast-index budget into a higher-cost
       // secondary index. No effect on a field that fits within the budget.
       allowOverflow: z.boolean().optional(),
     })
-    .strict(),
+    .strict()
+    .superRefine((lf, ctx) => {
+      const hasFieldName = lf.fieldName !== undefined;
+      const hasFieldNames = lf.fieldNames !== undefined;
+      if (hasFieldName === hasFieldNames) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "a lookup field declares either 'fieldName' (one field) or 'fieldNames' " +
+            "(2-3 fields matched together), never both and never neither",
+        });
+        return; // the combination is already wrong; skip the composite-only checks below
+      }
+      if (hasFieldNames) {
+        if (lf.unique !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['unique'],
+            message: "'unique' is not available on a composite ('fieldNames') lookup",
+          });
+        }
+        if (lf.rangeEnabled !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['rangeEnabled'],
+            message: "'rangeEnabled' is not available on a composite ('fieldNames') lookup",
+          });
+        }
+      }
+    }),
 ]);
 
 // Schema capabilities — today just `auditHistory` (platform default true). We
@@ -213,7 +261,29 @@ const BlueprintSchemaSchema = z
     // schema-create request.
     basedOn: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((schema, ctx) => {
+    // A composite ('fieldNames') lookup is record-only — the platform's composite
+    // index has no document/user/entity reader yet. `allowedSurfaces` omitted
+    // defaults (loader-side) to ['record'], so only an EXPLICIT, different value
+    // is a violation here.
+    const hasComposite = (schema.lookupFields ?? []).some(
+      (lf) => typeof lf === 'object' && lf.fieldNames !== undefined,
+    );
+    if (!hasComposite) return;
+    const surfaces = schema.allowedSurfaces;
+    const isRecordOnly = surfaces === undefined || (surfaces.length === 1 && surfaces[0] === 'record');
+    if (!isRecordOnly) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['allowedSurfaces'],
+        message:
+          `schema '${schema.typeName}': a composite ('fieldNames') lookup requires ` +
+          "allowedSurfaces to be exactly ['record'] — the platform's composite index has no " +
+          'document/user/entity reader yet',
+      });
+    }
+  });
 
 const BlueprintAccessProfileSchema = z
   .object({

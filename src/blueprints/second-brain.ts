@@ -90,9 +90,10 @@ const secondBrain: Blueprint = {
       // Lookup shapes are MIGRATION-LOCKED once the schema is live (a field cannot
       // flip equality↔range later), so each is chosen on purpose:
       //   • `source` — EQUALITY, sorted by `lastUpdated`: enumerate notes from one
-      //     source, most-recently-touched first. `lastUpdated` is always present, so
-      //     the sort never drops a note (sorting an equality lookup by an OPTIONAL
-      //     field would silently exclude rows that lack it).
+      //     source, most-recently-touched first. A platform timestamp is the natural
+      //     choice for "most recently touched" and is always present, so every note
+      //     has a position. (Sorting by an OPTIONAL payload field is also fine — notes
+      //     lacking it are ordered ahead of those that have it, never dropped.)
       //   • `status` — EQUALITY: "show archived notes".
       //   • `capturedAt` — RANGE: ordered `from`/`to`/`prefix` ("captured in 2026-06").
       // `externalId` has a built-in first-class finder — look it up directly, never

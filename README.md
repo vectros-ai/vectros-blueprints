@@ -79,30 +79,51 @@ A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
 
 A schema additionally accepts:
 
-- **`lookupFields`** — each entry is either a bare field name (`"status"`) or an
-  object `{ fieldName, unique?, rangeEnabled?, sortBy?, allowOverflow? }`. The
-  index shape is **migration-locked** — you cannot change it once the schema is
-  live, even by removing and re-adding the field — so choose deliberately:
-  - `unique` enforces a uniqueness constraint.
+- **`lookupFields`** — each entry is a bare field name (`"status"`), an object
+  `{ fieldName, unique?, rangeEnabled?, sortBy?, allowOverflow? }` (one field),
+  or an object `{ fieldNames, sortBy?, allowOverflow? }` (a **composite**: 2-3
+  fields matched together at once — see below). The index shape is
+  **migration-locked** — you cannot change it once the schema is live, even by
+  removing and re-adding the field(s) — so choose deliberately:
+  - `unique` enforces a uniqueness constraint. Single-field lookups only.
   - **equality (default) vs. `rangeEnabled`** — equality for ids/foreign keys/
     status enums/categories; `rangeEnabled` (ordered `from`/`to`/`prefix`, billed
     at the range rate) for values you query as an order (**dates, sequences,
     scores, versions**). Range/prefix order is lexical, so ISO-8601 dates sort
     correctly but an ordinal enum (`low…urgent`) would sort alphabetically — leave
-    those as equality.
+    those as equality. Single-field lookups only — a composite is an exact-match
+    index over its fields; declare the range lookup separately.
   - **7-slot budget** — a schema has 7 fast equality-lookup slots (ownership ids +
     `externalId` ride their own; `rangeEnabled` lookups use a row, not a slot, so
-    they don't count). An 8th equality lookup is rejected unless it sets
-    `allowOverflow` (a higher-cost secondary index).
+    they don't count; a composite counts as ONE slot). An 8th equality lookup is
+    rejected unless it sets `allowOverflow` (a higher-cost secondary index).
   - `sortBy` sets the equality-lookup listing order (`createdAt` default,
-    `lastUpdated`, or a declared field). Sorting by an **optional** field silently
-    drops records lacking it — prefer the always-present timestamps.
+    `lastUpdated`, or a declared field), and is also what `sortFrom`/`sortTo`
+    narrow against. The sorted field may be optional: records carrying no value
+    for it are listed ahead of those that do, and are never inside a bounded
+    window. Both `sortBy` and the sorted field's **type** are migration-locked,
+    and an `array`/`object` field cannot be a `sortBy` target. Valid on a
+    composite too, ordering *within* a group (see below), not across the result.
   - **Sensitive fields may be equality lookups** (HMAC blind index → exact
     find-by-value without storing the value in the clear), but never `rangeEnabled`
-    (a hash is not orderable), and no `sortBy` may name a sensitive field.
+    (a hash is not orderable), and no `sortBy` may name a sensitive field. This
+    applies per-field even inside a composite.
   Max 10. Do **not** list a reserved identifier (`externalId` or an ownership id) —
   those have first-class finders, so the platform rejects redeclaring them as
-  schema lookups.
+  schema lookups; a composite may not carry one in any position either.
+
+  **Composite (conjunctive) lookups** — `{ fieldNames: ['status', 'area'] }` matches
+  on *all* of the listed fields at once: "every record where `status` is `open`
+  **and** `area` is `billing`", exact and complete, in the declared field order.
+  2-3 fields; a 1-element list is rejected (it is not a spelling of the plain
+  `fieldName` form — declare that instead). **Order is significant and
+  migration-locked**: a query may match a leading run of the list (the first
+  field alone, the first two together, …) but never a later field by itself —
+  declare a separate lookup for that. `unique` and `rangeEnabled` are refused on
+  a composite; `sortBy` and `allowOverflow` are still available. **Record-only**:
+  a schema declaring a composite must set `allowedSurfaces` to exactly `['record']`
+  (or omit it — the loader defaults to `['record']`) — the platform's composite
+  index has no document/user/entity reader yet.
 - **`capabilities`** — today `{ auditHistory }`; defaults to `true` on the
   platform when omitted. Surface it to make the audit posture self-documenting.
 - **`active`** — whether the schema accepts new records (inactive schemas reject

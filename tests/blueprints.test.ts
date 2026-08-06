@@ -14,6 +14,13 @@ import {
 } from '../src/types.js';
 import { BUNDLED_BLUEPRINTS, BLUEPRINT_NAMES, getBlueprint } from '../src/index.js';
 
+/** Every field name a lookup entry references — one for a plain/bare entry, 2-3 for a composite. */
+function lookupLegs(lf: string | { fieldName?: string; fieldNames?: string[] }): string[] {
+  if (typeof lf === 'string') return [lf];
+  if (lf.fieldNames !== undefined) return lf.fieldNames;
+  return lf.fieldName !== undefined ? [lf.fieldName] : [];
+}
+
 function minimal(overrides: Partial<Blueprint> = {}): Blueprint {
   return {
     name: 'demo',
@@ -113,15 +120,20 @@ test('GUARD: a sensitive field is never searchable, never range/sort-indexed (bu
       }
       for (const lf of s.lookupFields ?? []) {
         if (typeof lf === 'string') continue;
-        if (sensitiveIds.has(lf.fieldName)) {
-          assert.ok(
-            !lf.rangeEnabled,
-            `${b.name}.${s.typeName}.${lf.fieldName}: a sensitive lookup cannot be rangeEnabled (a blind hash is not orderable)`,
-          );
+        // Per-leg, not per-entry: a composite's sensitivity/rangeEnabled
+        // constraint applies to EVERY leg, not just a single fieldName.
+        const legs = lookupLegs(lf);
+        for (const leg of legs) {
+          if (sensitiveIds.has(leg)) {
+            assert.ok(
+              !lf.rangeEnabled,
+              `${b.name}.${s.typeName}.${leg}: a sensitive lookup cannot be rangeEnabled (a blind hash is not orderable)`,
+            );
+          }
         }
         assert.ok(
           !(lf.sortBy && sensitiveIds.has(lf.sortBy)),
-          `${b.name}.${s.typeName}.${lf.fieldName}: sortBy must not name a sensitive field (its plaintext would land in a sort key)`,
+          `${b.name}.${s.typeName}.${legs.join(',')}: sortBy must not name a sensitive field (its plaintext would land in a sort key)`,
         );
       }
     }
@@ -169,7 +181,10 @@ test('SHOWCASE: bundled date fields are range-queryable and re-model nothing tha
   for (const b of BUNDLED_BLUEPRINTS) {
     for (const s of b.schemas) {
       for (const lf of s.lookupFields ?? []) {
-        if (typeof lf === 'string' || !lf.rangeEnabled) continue;
+        // rangeEnabled is refused on a composite ('fieldNames') lookup (schema-enforced), so a
+        // range-enabled entry always has a single fieldName — but that's a runtime invariant,
+        // not one TS can see through the optional type, hence the explicit guard.
+        if (typeof lf === 'string' || !lf.rangeEnabled || lf.fieldName === undefined) continue;
         rangeFields.push(lf.fieldName);
         const fld = s.fields.find((f) => f.fieldId === lf.fieldName);
         assert.ok(
@@ -210,11 +225,14 @@ test('GUARD: no bundled schema declares a reserved identifier as a lookup field'
   for (const b of BUNDLED_BLUEPRINTS) {
     for (const s of b.schemas) {
       for (const lf of s.lookupFields ?? []) {
-        const name = typeof lf === 'string' ? lf : lf.fieldName;
-        assert.ok(
-          !RESERVED.has(name),
-          `${b.name}.${s.typeName}: '${name}' is a reserved identifier and must not be a lookup field — look it up via its first-class finder`,
-        );
+        // Every leg, not just the leading one — a composite carrying a reserved name in a
+        // NON-leading position is exactly the shape a leading-only check would miss.
+        for (const name of lookupLegs(lf)) {
+          assert.ok(
+            !RESERVED.has(name),
+            `${b.name}.${s.typeName}: '${name}' is a reserved identifier and must not be a lookup field — look it up via its first-class finder`,
+          );
+        }
       }
     }
   }
@@ -693,19 +711,43 @@ test('agentic-sdlc: `gotcha` is intentionally reference-free (the standalone tra
   assert.ok(!gotcha.fields.some((f) => f.fieldType === 'reference'), 'gotcha must declare no reference field');
 });
 
-test('GUARD: any lookup sortBy names a required field or a platform timestamp (never an optional user field)', () => {
-  // Sorting an equality lookup by an OPTIONAL field silently drops records lacking it
-  // (README § lookupFields). A safe sortBy is either a `required` declared field or a
-  // platform-managed always-present timestamp. Guard the whole library against the class.
+test('GUARD: any lookup sortBy names a platform timestamp or a declared, order-bearing field', () => {
+  // A sortBy must name something the platform can order by, permanently. The server enforces
+  // THREE rules, all migration-locked, so a blueprint that breaks any of them cannot be
+  // corrected in place — the schema would need a new field name. This test owns two:
+  //   1. The target must be DECLARED on the schema (or be a platform timestamp).
+  //   2. It must have a meaningful order: `array` and `object` are rejected outright.
+  // The third — a sortBy must never name a `sensitive` field, whose plaintext would land in
+  // a GSI sort key — is enforced by 'GUARD: a sensitive field is never searchable, never
+  // range/sort-indexed' above, which owns the whole sensitive surface. Named here because
+  // this comment previously read as if it enumerated the complete rule set, which is how a
+  // reader concludes a rule is unguarded when it is merely guarded elsewhere.
+  //
+  // ⚠️ Both assertions below are VACUOUS against today's corpus: the only bundled sortBy is
+  // `lastUpdated`, which returns at the PLATFORM_TIMESTAMPS check before reaching either.
+  // They are forward guards on blueprints not yet written, not evidence about what ships.
+  //
+  // The field does NOT need to be `required` — an earlier version of this guard enforced
+  // that, on the belief that sorting by an optional field "silently drops" records lacking
+  // it. That was never true (an equality lookup resolves on the partition key; sortBy only
+  // orders within it), and the platform now gives value-less records their own ordered
+  // position ahead of the rest.
   const PLATFORM_TIMESTAMPS = new Set(['createdAt', 'lastUpdated']);
+  const UNORDERABLE = new Set(['array', 'object']);
   for (const b of BUNDLED_BLUEPRINTS) {
     for (const s of b.schemas) {
-      const requiredFields = new Set(s.fields.filter((f) => f.required).map((f) => f.fieldId));
+      const byId = new Map(s.fields.map((f) => [f.fieldId, f]));
       for (const lf of s.lookupFields ?? []) {
         if (typeof lf === 'string' || !lf.sortBy) continue;
+        if (PLATFORM_TIMESTAMPS.has(lf.sortBy)) continue;
+        const target = byId.get(lf.sortBy);
         assert.ok(
-          PLATFORM_TIMESTAMPS.has(lf.sortBy) || requiredFields.has(lf.sortBy),
-          `${b.name}.${s.typeName}.${lf.fieldName}: sortBy '${lf.sortBy}' must be a required field or a platform timestamp (else optional-field rows drop)`,
+          target,
+          `${b.name}.${s.typeName}.${lf.fieldName}: sortBy '${lf.sortBy}' names no declared field`,
+        );
+        assert.ok(
+          !UNORDERABLE.has(target.fieldType),
+          `${b.name}.${s.typeName}.${lf.fieldName}: sortBy '${lf.sortBy}' is '${target.fieldType}', which has no meaningful order`,
         );
       }
     }
@@ -888,6 +930,118 @@ test('seed: REJECTS a surface the schema does not allow (document seed of a reco
   );
   assert.match(e.message, /surface 'document'/);
   assert.match(e.message, /allows only \[record\]/);
+});
+
+// ── composite ('fieldNames') lookups — SCHEMA/FORMAT support only; no bundled
+// blueprint adopts one yet (a separate, deliberate content decision) ────────
+
+/** A minimal blueprint carrying one schema with the given lookupFields + allowedSurfaces. */
+function withLookup(
+  lookupFields: unknown[],
+  allowedSurfaces?: ('record' | 'document' | 'user' | 'entity')[],
+): unknown {
+  return minimal({
+    schemas: [
+      {
+        typeName: 'widget',
+        displayName: 'Widget',
+        fields: [
+          { fieldId: 'status', fieldType: 'enum', enumValues: ['open', 'closed'] },
+          { fieldId: 'area', fieldType: 'string' },
+          { fieldId: 'owner', fieldType: 'string' },
+        ],
+        lookupFields: lookupFields as never,
+        ...(allowedSurfaces ? { allowedSurfaces } : {}),
+      },
+    ],
+  });
+}
+
+test('composite lookup: a 2-field fieldNames entry is accepted', () => {
+  assert.doesNotThrow(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'] }])));
+});
+
+test('composite lookup: a 3-field fieldNames entry is accepted', () => {
+  assert.doesNotThrow(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area', 'owner'] }])));
+});
+
+test('composite lookup: REJECTS both fieldName and fieldNames set', () => {
+  const e = caught(() => parseBlueprint(withLookup([{ fieldName: 'status', fieldNames: ['status', 'area'] }])));
+  assert.match(e.message, /never both and never neither/);
+});
+
+test('composite lookup: REJECTS neither fieldName nor fieldNames set', () => {
+  const e = caught(() => parseBlueprint(withLookup([{ unique: true }])));
+  assert.match(e.message, /never both and never neither/);
+});
+
+test('composite lookup: REJECTS a 1-element fieldNames (not a spelling of the scalar form)', () => {
+  assert.throws(() => parseBlueprint(withLookup([{ fieldNames: ['status'] }])), BlueprintValidationError);
+});
+
+test('composite lookup: REJECTS a 4-element fieldNames (arity bounded at 3)', () => {
+  assert.throws(
+    () => parseBlueprint(withLookup([{ fieldNames: ['status', 'area', 'status', 'area'] }])),
+    BlueprintValidationError,
+  );
+});
+
+test('composite lookup: REJECTS unique on a composite', () => {
+  const e = caught(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'], unique: true }])));
+  assert.match(e.message, /'unique' is not available on a composite/);
+});
+
+test('composite lookup: REJECTS rangeEnabled on a composite', () => {
+  const e = caught(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'], rangeEnabled: true }])));
+  assert.match(e.message, /'rangeEnabled' is not available on a composite/);
+});
+
+test('composite lookup: sortBy and allowOverflow ARE available on a composite', () => {
+  assert.doesNotThrow(() =>
+    parseBlueprint(withLookup([{ fieldNames: ['status', 'area'], sortBy: 'status', allowOverflow: true }])),
+  );
+});
+
+test('composite lookup: ACCEPTS on a schema whose allowedSurfaces is omitted (defaults to record)', () => {
+  assert.doesNotThrow(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'] }])));
+});
+
+test('composite lookup: ACCEPTS on a schema whose allowedSurfaces is explicitly ["record"]', () => {
+  assert.doesNotThrow(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'] }], ['record'])));
+});
+
+test('composite lookup: REJECTS on a schema whose allowedSurfaces includes document', () => {
+  const e = caught(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'] }], ['document'])));
+  assert.match(e.message, /allowedSurfaces to be exactly \['record'\]/);
+});
+
+test('composite lookup: REJECTS on a schema whose allowedSurfaces is record PLUS another surface', () => {
+  // Exactly ['record'], not merely including it — a schema bound to record+document still
+  // cannot carry a composite, because the composite index has no document reader at all.
+  const e = caught(() => parseBlueprint(withLookup([{ fieldNames: ['status', 'area'] }], ['record', 'document'])));
+  assert.match(e.message, /allowedSurfaces to be exactly \['record'\]/);
+});
+
+test('composite lookup: a schema with NO composite is unaffected by the allowedSurfaces check', () => {
+  // Negative control — the schema-level allowedSurfaces refinement must not fire on a
+  // perfectly ordinary single-field lookup, regardless of what allowedSurfaces says.
+  assert.doesNotThrow(() => parseBlueprint(withLookup(['status'], ['document'])));
+});
+
+test('composite lookup: no BUNDLED blueprint declares one yet (deliberately deferred content decision)', () => {
+  // The format/schema support landed here; whether any bundled blueprint should actually USE a
+  // composite is a separate, deliberate content decision not made in this change. Pin the
+  // negative so that decision, when made, is a visible diff here — not a silent side effect.
+  for (const b of BUNDLED_BLUEPRINTS) {
+    for (const s of b.schemas) {
+      for (const lf of s.lookupFields ?? []) {
+        assert.ok(
+          typeof lf === 'string' || lf.fieldNames === undefined,
+          `${b.name}.${s.typeName} declares a composite lookup — if intentional, update this pin`,
+        );
+      }
+    }
+  }
 });
 
 /** Capture a thrown BlueprintValidationError (mirrors error-format.test.ts). */

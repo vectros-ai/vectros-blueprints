@@ -3,6 +3,40 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.10.0
+
+### Added
+
+- **A schema's `lookupFields` can now declare a composite (conjunctive) lookup** —
+  `{ fieldNames: ['status', 'area'] }` matches on several fields at once ("every
+  record where `status` is `open` **and** `area` is `billing`"), exact and
+  complete, in the declared field order. 2-3 fields; order is significant and
+  migration-locked, matching a leading run of the list (never a later field
+  alone). `unique`/`rangeEnabled` are not available on a composite; `sortBy` and
+  `allowOverflow` are. A schema declaring one must be record-only
+  (`allowedSurfaces` omitted, or exactly `['record']`) — the platform's
+  composite index has no document/user/entity reader yet. No bundled blueprint
+  declares one in this release; adopting the shape in the bundled library is a
+  separate, deliberate content decision.
+
+### Fixed
+
+- **Corrected the `sortBy` guidance in the README.** It said that sorting an
+  equality lookup by an **optional** field "silently drops records lacking it,"
+  and advised preferring the always-present timestamps. That was never accurate —
+  an equality lookup resolves on the partition key, and `sortBy` only orders
+  within it — and the platform now gives records with no value for the sorted
+  field their own ordered position ahead of the rest, for records written from
+  this platform release onward (earlier records take that position once they are
+  next updated). The README also now covers
+  what a `sortBy` genuinely constrains: the sorted field's declared type is
+  migration-locked alongside `sortBy` itself, and an `array`/`object` field
+  cannot be a `sortBy` target.
+
+- The bundled-blueprint guard that enforced the retired "sortBy must name a
+  required field" rule now checks the rules that actually hold, so a blueprint
+  sorting by an optional field is no longer rejected.
+
 ## 0.9.0
 
 ### Added
