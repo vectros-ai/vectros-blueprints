@@ -69,11 +69,12 @@ vectros bootstrap --blueprint agentic-sdlc --no-seed --yes
 vectros whoami
 ```
 
-`bootstrap` provisions the context + schemas + a least-privilege `ssk_*` (written
-once to `~/.vectros/agentic-sdlc.key.json`) and safe-merges the Vectros MCP server
-into your **Claude Desktop** config; use `--client code` for **Claude Code**, or
-`--print` to emit the snippet without writing a file. Restart your MCP client to load
-it. (Prefer not to install globally? Prefix each command with `npx -y`, e.g.
+`bootstrap` provisions the context + schemas + a least-privilege `ssk_*`, stores it in
+this machine's OS credential store (or an encrypted file where none is available),
+and safe-merges an entry naming only that non-secret alias into your **Claude
+Desktop** config; use `--client code` for **Claude Code**, or `--no-merge` to emit
+the snippet without writing a file. Restart your MCP client to load it. (Prefer not
+to install globally? Prefix each command with `npx -y`, e.g.
 `npx -y @vectros-ai/cli bootstrap …` — on PowerShell quote the spec:
 `npx -y "@vectros-ai/cli" …`.)
 

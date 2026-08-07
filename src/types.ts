@@ -231,7 +231,19 @@ const BlueprintSchemaSchema = z
     typeName: z.string().min(1),
     displayName: z.string().min(1),
     description: z.string().optional(),
-    indexMode: z.enum(['HYBRID', 'SEMANTIC', 'TEXT']).optional(),
+    // Default search-index mode for instances of this type. HYBRID, SEMANTIC and
+    // TEXT all make content searchable; NONE is store-only — the data is
+    // persisted, readable by id/externalId, and fully usable for structured
+    // lookups, but it is never indexed, so it can never appear in a search or a
+    // grounded answer. That makes NONE the right choice for a type whose contents
+    // must not compete with curated knowledge for retrieval slots: the exclusion
+    // is structural rather than a filter the caller has to remember to apply.
+    //
+    // OMITTING THIS IS NOT THE SAME AS 'HYBRID'. With no default declared, a
+    // record that does not set its own indexMode resolves to NONE (store-only),
+    // and a document with no indexMode is rejected outright. Declare the mode you
+    // want; do not rely on the absent case to mean "searchable".
+    indexMode: z.enum(['HYBRID', 'SEMANTIC', 'TEXT', 'NONE']).optional(),
     fields: z.array(BlueprintFieldDefSchema).default([]),
     lookupFields: z.array(BlueprintLookupFieldSchema).max(10).optional(),
     // Which typed surfaces may bind this schema. REQUIRED + non-empty on

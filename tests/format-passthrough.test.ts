@@ -218,3 +218,38 @@ test('rejects an unknown top-level schema key (strict)', () => {
     BlueprintValidationError,
   );
 });
+
+/**
+ * indexMode accepts every mode the platform does — NONE INCLUDED.
+ *
+ * NONE (store-only) was missing from the enum, so the format could not express a
+ * type that is persisted and lookup-queryable but deliberately kept out of search
+ * — the one mode you reach for when a type's contents must never compete with
+ * curated knowledge for retrieval slots. The omission was silent: a blueprint
+ * declaring it failed structural validation here, long before the platform (which
+ * has always accepted it) ever saw the request. Nothing pinned the enum at all,
+ * which is why it drifted, so these tests pin all four.
+ */
+for (const mode of ['HYBRID', 'SEMANTIC', 'TEXT', 'NONE'] as const) {
+  test(`accepts indexMode ${mode}`, () => {
+    const bp = parseBlueprint(withSchema({ indexMode: mode }));
+    assert.equal(bp.schemas[0].indexMode, mode);
+  });
+}
+
+test('indexMode is optional — and its absence is NOT HYBRID', () => {
+  // Absent stays absent through the format: nothing here substitutes a default.
+  // The platform resolves an absent RECORD mode to NONE (store-only) and rejects
+  // a document that declares none, so a blueprint that wants search must say so.
+  const bp = parseBlueprint(withSchema({}));
+  assert.equal(bp.schemas[0].indexMode, undefined);
+});
+
+test('rejects an indexMode outside the platform enum', () => {
+  assert.throws(() => parseBlueprint(withSchema({ indexMode: 'FULLTEXT' })), BlueprintValidationError);
+  // Uppercase only — the format is deliberately STRICTER than the API, which
+  // normalizes case and would have accepted 'none'. Pinned so the canonical
+  // spelling is what a blueprint author reads back, and pinned for NONE the same
+  // way it already held for the other three rather than as a special case.
+  assert.throws(() => parseBlueprint(withSchema({ indexMode: 'none' })), BlueprintValidationError);
+});

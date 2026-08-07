@@ -3,6 +3,27 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.11.0
+
+### Added
+
+- **`indexMode` accepts `NONE`.** A schema may now declare `indexMode: NONE` —
+  store-only: the data is persisted, readable by id/`externalId`, and fully usable
+  for structured lookups, but it is never indexed, so it can never appear in a
+  search result or a grounded answer. The platform has always accepted this mode;
+  the blueprint format did not, so a blueprint declaring it failed structural
+  validation before the request was ever made. Reach for it when a type's contents
+  must not compete with curated knowledge for retrieval slots — the exclusion is
+  then structural rather than a filter every caller has to remember to apply.
+
+  Note that **omitting `indexMode` is not the same as `HYBRID`**: a record with no
+  mode of its own resolves to `NONE`, and a document with none is rejected. Declare
+  the mode you want.
+
+  `@vectros-ai/cli` bundles its own copy of this package, so applying a blueprint
+  that declares `NONE` needs a CLI built against `0.11.x` — an earlier CLI rejects
+  the value during structural validation, before any request is made.
+
 ## 0.10.0
 
 ### Added
