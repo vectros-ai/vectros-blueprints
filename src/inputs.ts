@@ -124,8 +124,34 @@ const INNER_REF_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
  * install-time resolver leaves them literal too. A deferred token is NOT an
  * "unknown namespace" error — distinct from `$`-prefixed values, which are never
  * matched by the `${{ … }}` scanner at all.
+ *
+ * `under` joins `self` here: `${{ under.self.userId }}` (an entity-ownership-graph
+ * resolution form) is a real, platform-verified runtime reference form, resolved
+ * server-side at credential-mint time — this install-time resolver must leave it
+ * untouched exactly like `self`/`identities`.
  */
-const DEFERRED_NAMESPACES = new Set(['self', 'identities']);
+const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under']);
+
+/**
+ * Deferred references are NOT limited to a flat `namespace.name` shape — the runtime
+ * grammar these namespaces defer to supports deeper dotted paths (`self.scope.<ns>`,
+ * the "identity is a value" form; `under.self.<field>`, the entity-ownership-graph
+ * resolution form). Matches
+ * a deferred namespace followed by ONE OR MORE `.segment` groups, so both a simple
+ * `self.userId` and a nested `self.scope.org` / `under.self.userId` pass through
+ * verbatim. Built from {@link DEFERRED_NAMESPACES} so the two can't drift apart.
+ * Non-deferred namespaces (`inputs`/`vectros`) are NOT matched here and keep the
+ * strict two-segment {@link INNER_REF_RE}/{@link WHOLE_TOKEN_RE} shape below — they are
+ * genuine flat lookups, not a resolvable-later reference grammar.
+ *
+ * Checked only from {@link interpolate} — {@link substituteValue}'s `WHOLE_TOKEN_RE`
+ * branch already special-cases the flat (2-segment) deferred form (e.g. `self.userId`);
+ * a deeper token like `self.scope.org` simply fails that strict 2-segment match and
+ * falls through to `interpolate`, where this pattern catches it. No separate
+ * whole-string variant needed.
+ */
+const DEFERRED_NS_ALTERNATION = [...DEFERRED_NAMESPACES].join('|');
+const DEFERRED_INNER_RE = new RegExp(`^(?:${DEFERRED_NS_ALTERNATION})(?:\\.[A-Za-z_]\\w*)+$`);
 
 /** Resolve one `ns.name` reference to its value, or push an issue + return undefined. */
 function resolveRef(ns: string, name: string, ctx: ResolveCtx, path: string): InputScalar | undefined {
@@ -188,14 +214,17 @@ function interpolate(str: string, ctx: ResolveCtx, path: string): string {
       });
     } else {
       const inner = (m[1] ?? '').trim();
+      if (DEFERRED_INNER_RE.test(inner)) {
+        out += m[0]; // deferred namespace, any depth → re-emit the token verbatim (resolved later)
+        last = TOKEN_SCAN_RE.lastIndex;
+        continue;
+      }
       const ref = inner.match(INNER_REF_RE);
       if (!ref) {
         ctx.issues.push({
           path,
           message: `malformed reference '\${{ ${inner} }}' — expected '\${{ namespace.name }}' (escape a literal with '$\${{')`,
         });
-      } else if (DEFERRED_NAMESPACES.has(ref[1])) {
-        out += m[0]; // deferred namespace → re-emit the token verbatim (resolved later)
       } else {
         const v = resolveRef(ref[1], ref[2], ctx, path);
         if (v !== undefined) out += String(v);

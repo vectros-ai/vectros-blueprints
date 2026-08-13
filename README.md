@@ -43,7 +43,7 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
 - `BUNDLED_BLUEPRINTS` / `BLUEPRINT_NAMES` / `getBlueprint(name)` — the
   curated library: `task-management` (the minimal authoring exemplar),
   `coding-agent-memory`, `agentic-sdlc` (a whole-SDLC system of
-  record for an AI dev team: ten schemas — nine curated (split by content vs
+  record for an AI dev team: eleven schemas — nine curated (split by content vs
   structure) — ADRs, designs, references, runbooks, and post-mortems as
   **documents**; controls, conventions, gotchas, and a glossary as **records** —
   linked into a **cross-surface** knowledge graph, with hybrid search + grounded
@@ -157,6 +157,22 @@ declared roles in the context but binds them to no one. The bundled `agentic-sdl
 ships an `editor` role for this — join your own user to the context so you can
 browse and curate the knowledge base in the app. Role clauses pass the same
 data-plane scope gate as `accessProfile`.
+
+A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
+issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
+audience, contextId, subClaim?, emailClaim? }`. Unlike `schemas`/`accessProfile`/
+`roles` (applied under a per-context token), issuers are applied in the loader's
+**bootstrap-token phase**, alongside app-context/service-principal creation —
+tenant-wide provisioning config that needs the bootstrap credential's owner-only
+authority, not an ordinary context-scoped one. `(issuer, audience)` must be
+globally unique across the tenant — use a distinct `audience` per environment/
+context sharing one IdP account.
+
+Which top-level fields apply in which loader phase isn't something you have to
+infer or remember: `BLUEPRINT_FIELD_PHASES` (exported alongside `Blueprint`) is a
+`{ fieldName: 'bootstrap' | 'in-context' }` map you can inspect directly —
+`@vectros-ai/cli`'s own `vectros blueprint plan` preview derives its
+`[<phase>-token phase]` annotations from this same map, so the two can't drift.
 
 All of the above are **optional and backward-compatible** — a blueprint that
 omits them parses and provisions exactly as before.

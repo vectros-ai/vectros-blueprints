@@ -24,6 +24,9 @@ export {
   type IdentityDecl,
   type IdentitiesDecl,
   type BlueprintIssue,
+  type BlueprintIssuer,
+  type LoaderPhase,
+  BLUEPRINT_FIELD_PHASES,
 } from './types.js';
 
 export {

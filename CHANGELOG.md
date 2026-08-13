@@ -3,6 +3,137 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.12.0
+
+### Added
+
+- **Top-level `issuers` — register trusted third-party IdP issuers for BYO-IdP
+  token exchange.** A blueprint may now declare `issuers: [{ issuerId, issuer,
+  jwksUri, audience, contextId, subClaim?, emailClaim? }]`. Unlike
+  `schemas`/`accessProfile`/`roles` (applied under a per-context credential),
+  issuers are tenant-wide provisioning config — the `@vectros-ai/cli` loader
+  applies them in its bootstrap-token phase, alongside app-context/service-
+  principal creation, using the same owner-only authority that creates the app
+  context itself. `(issuer, audience)` must be globally unique across your
+  tenant — use a distinct `audience` per environment/context sharing one IdP
+  account. Fully backward-compatible: a blueprint that omits `issuers` parses
+  and provisions exactly as before.
+
+- **`BLUEPRINT_FIELD_PHASES` — which loader phase each top-level field applies
+  in, self-documented.** A new exported `{ fieldName: 'bootstrap' | 'in-context' }`
+  map (plus its `LoaderPhase` type) naming which of `@vectros-ai/cli`'s two
+  loader phases each top-level blueprint field's resources are applied under —
+  `issuers`/`servicePrincipal` in the bootstrap-token phase, `schemas`/
+  `accessProfile`/`roles` in the per-context phase. Previously this was only
+  discoverable by reading the CLI loader's source.
+
+- **`agentic-sdlc` gains a `candidate` schema — the staging area in front of
+  `memory`** (blueprint `1.6.0` → `1.9.0`). An agent distilling its own sessions
+  proposes claims faster than it can verify them, and an unverified claim recalled
+  as fact is worse than no claim at all. A proposal is now written as a
+  `candidate`, verified, and only then promoted to a `memory`.
+
+  It is **store-only (`indexMode: NONE`)**, which is the load-bearing part: an
+  unverified claim is never indexed, so it cannot be returned by a search or a
+  grounded answer under any query — the separation is enforced by the platform, not
+  by every caller remembering a filter. Candidates stay reachable by id and by the
+  lookups a review queue needs: `disposition` (what is waiting anywhere),
+  `sessionId` (everything one conversation proposed), a `proposedAt` range (worked
+  by age), and a **composite `(sessionId, disposition)`** — what is still unsettled
+  *in this conversation*, which neither single-field lookup answers alone and which
+  is the read an agent is shown as it works. It is the first bundled schema to
+  declare a composite lookup. `sessionId` leads it because the leading field
+  becomes the partition key, and leading with a four-value enum would sort every
+  candidate ever proposed into four partitions.
+
+  Its fields **mirror `memory`'s** wherever the two overlap — `title`, `body`,
+  `kind`, `area`, `tags`, `sourceRef` — so verifying a candidate is a copy rather
+  than a translation. `dest` (`memory` | `doc`) is the proposer's suggestion about which tier the claim
+  belongs in — a question that stops existing once a verifier answers it. The
+  workflow fields (`sessionId`, `proposedAt`, `disposition`, `ref`, `resolved`,
+  `origin`, `reopenedWhy`, `revises`) are candidate-only too; they describe the
+  REVIEW, not the claim, and so have nothing to mirror.
+
+  The `member` role gains `records:r:candidate` — **read-only**, deliberately
+  asymmetric with `memory`'s full CRU: a verdict is the output of a verification
+  step, so it is written by the runtime that performed the check, while the queue,
+  the verdicts and the corrections stay browsable.
+
+### Fixed
+
+- **The full ownership-scope grammar (namespace + value + the ≤2-dimension
+  cap) is now validated on `accessProfile.identityOverrides`,
+  `schemas[].scopes`, `seed[].scopes`, AND every `dataScope` KEY
+  (`accessProfile.dataScope` and every `roles[].*.dataScope` clause) —
+  placeholder-aware.**
+  Previously these fields accepted almost any non-blank string, at every
+  level: a bad literal value (`"a:b"`), a retired legacy key (`orgId`), a
+  forbidden namespace (`scope:tenant`), a malformed `<namespace>:<value>`
+  array entry, or more than 2 scope dimensions all linted clean and 400'd at
+  apply — the exact deploy-time surprise this format's own validation exists
+  to pre-empt. A naive grammar bolt-on would have broken every blueprint
+  using the documented `${{ identities.<name> }}` substitution token (e.g.
+  `{ "scope:org": "${{ identities.team }}" }`, or `'team:${{ identities.team }}'`
+  in a `scopes` array), since the platform grammar deliberately excludes `$`,
+  `{`, `}` (a stored value is re-parsed for placeholders server-side, so a
+  placeholder-shaped literal would widen the credential to a whole
+  compartment). The new checks recognize and skip the documented substitution
+  form on every value — deferring to the existing declared-identity lint for
+  it — and apply the platform's grammar to everything else, including the
+  SUBSTITUTED value when `parseBlueprint` re-validates post-identity-
+  resolution at apply time. `seed[].scopes` also gains the `.max(2)` its own
+  doc comment already claimed but never enforced, and both `scopes` array
+  fields now reject a namespace repeated with a conflicting value (matching
+  the platform's own rule that an item carries at most one value per
+  namespace). `dataScope`'s KEYS get the same namespace-grammar check as
+  every other field here (`userId` is still a valid bare key — the principal
+  dimension — every other key must be a grammar-valid `scope:<ns>`);
+  `dataScope` VALUES are unchanged (a richer grammar — literal, the `null`
+  tenant sentinel, or a runtime `${{ self.* }}`/`${{ under.self.* }}`
+  placeholder — already partly covered by the existing placement lint, and
+  out of scope for this pass).
+
+  **This is a behavior change for any caller of `parseBlueprint`/
+  `parseBlueprintJson`: a blueprint that previously parsed (because these
+  fields were unvalidated) may now throw `BlueprintValidationError`** if it
+  carries a value these grammars reject. Every rejected shape was already
+  guaranteed to 400 at apply against the real platform, so nothing that
+  worked end-to-end starts failing — but a blueprint that got as far as
+  `validate`/`plan` on a bad value before now fails earlier, with a
+  different, more specific error.
+
+- **A malformed `${{ identities.* }}` reference now fails loudly instead of
+  silently never substituting.** Two shapes previously passed structural
+  validation but could never actually resolve: a hyphenated identity name
+  (`identities: { demo-org: {...} }` declared fine, but `${{ identities.demo-org }}`
+  could never match the reference grammar) and dotted property access
+  (`${{ identities.owner.externalId }}`, which the format has never supported —
+  only the whole identity id can be referenced). Both now reject at
+  `parseBlueprint`/`blueprint validate` time with a specific, actionable
+  message, before either could reach an apply and land as a literal
+  unresolved string in a live `scopes:`/dataScope field.
+
+- **`agentic-sdlc` guide: the query table showed `record_query` calls that cannot
+  be made.** Three rows passed several fields at once (e.g.
+  `record_query control { kind, criticality, status }`), but a lookup is an index
+  the schema declares, and every lookup in this blueprint declares a single field.
+  The rows now show a single-field lookup with the narrowing done caller-side, and
+  the note under the table explains that a schema *may* declare several fields as
+  one combined lookup — opt-in, declared up front, and not something a caller can
+  assemble from two independent ones — then points at `hybrid_search`'s `filters`
+  for ad-hoc multi-field filtering over a searchable type.
+
+- **The install-time token resolver rejected `${{ self.scope.<ns> }}` and any
+  `${{ under.self.* }}` reference as malformed**, even though these are the
+  platform's own documented runtime identity-reference grammar for a role's
+  `dataScope` — the resolver only recognized a flat, single-segment
+  `${{ namespace.name }}` shape. Both forms now resolve (are correctly left
+  literal for server-side resolution) at any depth, matching the runtime
+  grammar. The `${{ self.* }}`/`${{ under.self.* }}` placement lint (which
+  confines these tokens to a role clause's `dataScope`) is updated in
+  lockstep — a misplaced multi-segment token (e.g. in a seed record field)
+  is still caught, the same as the flat form always was.
+
 ## 0.11.0
 
 ### Added

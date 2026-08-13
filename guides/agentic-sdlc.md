@@ -1,7 +1,7 @@
 # Guide — the `agentic-sdlc` blueprint
 
 `agentic-sdlc` is a bundled blueprint: a **whole-SDLC system of record**
-for an AI development team. It provisions **ten schemas**: nine curated ones
+for an AI development team. It provisions **eleven schemas**: nine curated ones
 split by content vs structure — `decision` (ADRs), `design`, `reference`,
 `runbook`, and `postmortem` as **documents** (the markdown body is the artifact);
 `control`, `convention`, `gotcha`, and `term` (glossary) as **records** (the typed
@@ -18,12 +18,15 @@ use it day-to-day.
 
 ## 1. What you get
 
-- **10 schemas — 9 curated (content vs structure) + a private `memory` tier.** The
-  prose artifacts — `decision` (ADR), `design`, `reference`, `runbook`, `postmortem`
-  — are **documents** (the markdown body is searched + answered over). The structured
-  artifacts — `control`, `convention`, `gotcha`, `term` — are **records** (typed
-  fields, exact-queryable). The tenth, **`memory`** (§8), is a per-principal private
-  record type — an agent's own working memory, isolated by the `member` role.
+- **11 schemas — 9 curated (content vs structure) + a private `memory` tier and its
+  staging area.** The prose artifacts — `decision` (ADR), `design`, `reference`,
+  `runbook`, `postmortem` — are **documents** (the markdown body is searched +
+  answered over). The structured artifacts — `control`, `convention`, `gotcha`,
+  `term` — are **records** (typed fields, exact-queryable). The tenth, **`memory`**
+  (§8), is a per-principal private record type — an agent's own working memory,
+  isolated by the `member` role. The eleventh, **`candidate`** (§5), holds memories
+  an agent has *proposed* but not yet verified; it is **store-only**, so an
+  unverified claim can never surface in search.
   Every item has a stable `externalId`, so re-ingesting never duplicates: an
   unchanged item is returned as-is, and re-ingesting **edited** source with
   `upsert: true` overwrites it in place — the KB is *rebuildable* and *syncable*.
@@ -109,7 +112,7 @@ agent only archives); bind it to your user two ways:
 
 ### Seeds
 
-This blueprint ships **without bundled seeds** — it provisions the ten schemas +
+This blueprint ships **without bundled seeds** — it provisions the eleven schemas +
 the scoped key, and you fill it from your own corpus (next section). So the context
 starts clean; there's no synthetic data to remove. (If you fork a blueprint that
 *does* ship seeds and want a clean production context, `vectros bootstrap
@@ -194,12 +197,41 @@ also want an exact term/id hit.
 | You want… | Call |
 |---|---|
 | "Why did we decide X?" (grounded, cited) | `rag_ask "why did we choose X?"` (answers over document bodies) |
-| "Which critical controls are active, and how is each proven?" | `record_query control { kind:"control", criticality:"critical", status:"active" }` → follow `verifiedBy` to the runbook |
-| "What's the active rule for area X?" | `record_query convention { area:"<area>", status:"active" }` |
-| "Have we hit this failure before?" | `hybrid_search "<symptom>" contentTypes:["documents"], typeName:"postmortem"`; plus `record_query gotcha { area:"deploy", status:"active" }` |
-| "Define X" | `record_query term { term:"X" }` (unique lookup) |
+| "Which critical controls are active, and how is each proven?" | `record_query type:"control", field:"criticality", value:"critical"` → keep the `status:"active"` ones → follow `verifiedBy` to the runbook |
+| "What's the active rule for area X?" | `record_query type:"convention", field:"area", value:"<area>"` → keep the `status:"active"` ones |
+| "Have we hit this failure before?" | `hybrid_search "<symptom>" contentTypes:["documents"], typeName:"postmortem"`; plus `record_query type:"gotcha", field:"area", value:"deploy"` |
+| "Define X" | `record_query type:"term", field:"term", value:"X"` (unique lookup) |
 | "Latest decisions / search the designs" | `hybrid_search "<topic>" contentTypes:["documents"], typeName:"decision"` (or `"design"`, plus `filters:{ area:"<area>" }`) |
 | "What supersedes a given decision?" | document lookup on `decision` by `supersedes:"<externalId>"` |
+
+> **A lookup is an index the schema declares, so what you can ask is fixed at declare
+> time — not chosen per call.** `record_query`'s `field` names one declared lookup, plus one
+> mode: `value` (exact), `from`+`to` (range), or `prefix`. Ask `list_schemas` which lookups a
+> type actually has rather than assuming.
+>
+> Most lookups here name a **single** field, so a multi-field question over those types is
+> answered by looking up the most selective field and narrowing the (small) result set in
+> your own code. That is what the first three rows above do.
+>
+> One type declares a **combined** lookup: `candidate` over `sessionId` **and**
+> `disposition` together, for "what is still unsettled in this conversation" — see §5. Query
+> a combined lookup by naming its fields comma-joined, with one value per field in the
+> declared order:
+>
+> ```text
+> record_query  type:candidate  field:"sessionId,disposition"  values:["<sid>", "pending"]
+> ```
+>
+> Two things about combined lookups that are easy to get wrong. **You cannot assemble one
+> from two independent lookups** — passing a comma-joined `field` only works against a lookup
+> the schema itself declared that way, so `candidate`'s separate `disposition` and `sessionId`
+> lookups do not combine on demand. And **you may pass fewer values than the lookup declares**,
+> matching a leading run of its fields — but the fields you leave out then take part in the
+> ordering, so results come back grouped by them rather than as one sequence, and `order`
+> sorts *within* a group. Pass every value when you need a single ordered run.
+>
+> Either way a lookup is an exact index, not a query language: when you want ad-hoc
+> multi-field filtering over a searchable type, `hybrid_search`'s `filters` is the tool.
 
 ## 5. Agent memory — the shared KB plus private memory
 
@@ -211,6 +243,63 @@ the platform, never by an app-enforced field:
 |---|---|---|---|
 | **Curated KB** (the types above) | every member (read + semantic recall) | the service key / `editor` | normal ingest |
 | **Private memory** | its owner (+ context admins, see the caveat below) | its owner | `record_create memory …` |
+| **Candidates** (proposed, unverified) | its owner — read-only (+ context admins) | the bootstrap service key (`ssk_*`) — the runtime that verifies them | the runtime's own `record_create` / `record_update`; **not a member call** |
+
+### Candidates — the staging area in front of `memory`
+
+An agent that distills its own working sessions produces claims faster than it can
+check them, and an unchecked claim is worse than none: it is a plausible sentence
+that will later be recalled as fact. So a proposal is written as a **`candidate`**,
+an agent verifies it, and only then does it become a `memory`.
+
+Two properties make that safe, and both are enforced by the platform rather than by
+application code:
+
+- **`candidate` is store-only (`indexMode: NONE`).** It is never indexed, so no
+  search and no grounded answer can return an unverified claim under any query. You
+  reach candidates by id and by their lookups — which is all a review queue needs.
+- **A member reads candidates but never writes them.** A candidate's verdict is the
+  *output* of a verification step, so it is written by the runtime that performed
+  the check. Editing the verdict by hand would record a conclusion nothing verified.
+  Concretely: the credential that creates and settles candidates is the **bootstrap
+  service key** (`ssk_*`), which holds untyped `records:c`/`records:u`. A `member`
+  key holds `records:r:candidate` and nothing more, so `record_create candidate …`
+  from a member credential is denied by design — the workflow belongs to your
+  verifying runtime, not to a person.
+
+Its fields mirror `memory`'s wherever the two overlap (`title`, `body`, `kind`,
+`area`, `tags`, `sourceRef`), so promoting a verified candidate is a copy rather
+than a translation — nothing the proposer filled in has to be re-derived at the
+moment someone is deciding whether the claim is true. The one field with no
+counterpart among the mirrored fields is `dest` (`memory` or `doc`): the
+proposer's suggestion about which tier the claim belongs in, a question that stops
+existing once it is answered. The workflow fields — `sessionId`, `proposedAt`,
+`disposition`, `ref`, `resolved`, `origin`, `reopenedWhy`, `revises` — are
+candidate-only as well: they describe the REVIEW rather than the claim.
+
+Settling one is a plain field update — `disposition` moves from `pending` to
+`stored`, `documented`, or `ignored` — so it is reversible, and a correction is
+recorded as a separate candidate linked by `revises` / `supersededBy`.
+
+Three ways to read the queue, matching the three questions actually asked:
+
+```text
+record_query  type:candidate  field:"sessionId,disposition"  values:["<sid>","pending"]
+record_query  type:candidate  field:disposition              value:pending
+record_query  type:candidate  field:proposedAt               from:<iso> to:<iso>
+```
+
+The first is the combined lookup — what an agent is shown as it works, and the
+reason this type declares one: unsettled *in this conversation*, which neither
+single-field lookup answers on its own. The second is the queue-wide view across
+every conversation; the third works it by age. `sessionId` alone still has its own
+lookup, for "everything this conversation proposed, settled included", because that
+one wants a single oldest-first run rather than results grouped by `disposition`.
+
+One thing a combined lookup cannot do, whatever its fields: match the **absence** of
+a value. Every leg matches an exact value that is present, so "unsettled and not yet
+superseded" is the combined lookup plus a check on `supersededBy` in your own code —
+not a third leg.
 
 Enroll a person (or their agent) in one step:
 

@@ -174,3 +174,88 @@ test('parseBlueprint REJECTS an undeclared identity reference (offline, at valid
     assert.ok(err.issues.some((i) => i.message.includes('ghost')), 'expected a ghost-reference issue');
   }
 });
+
+// ── hyphenated names + dotted property access (silent no-op → loud) ───────────
+//
+// Both bugs share a root cause: the substitution/lint token grammar
+// (`[A-Za-z_]\w*`) is stricter than what could previously be DECLARED (no key
+// constraint) or WRITTEN as a reference (any string). A shape outside that
+// grammar used to match nothing anywhere — not the declared-identity lint, not
+// apply-time substitution — so it silently reached apply time as a literal,
+// unresolved '${{ ... }}' string instead of erroring.
+
+test('parseBlueprint REJECTS a hyphenated identity NAME in the identities: block', () => {
+  try {
+    parseBlueprint(minimalBlueprint({ identities: { 'demo-org': { kind: 'org', externalId: 'o-1' } } }));
+    assert.fail('expected throw');
+  } catch (err) {
+    assert.ok(err instanceof BlueprintValidationError);
+    assert.ok(
+      err.issues.some((i) => i.message.includes('demo-org') || i.path.includes('demo-org')),
+      `expected an issue naming 'demo-org', got ${JSON.stringify(err.issues)}`,
+    );
+  }
+});
+
+test('resolveBlueprintIdentities ALSO rejects a hyphenated identity name (same IdentitiesDeclSchema)', async () => {
+  await assert.rejects(
+    () => resolveBlueprintIdentities(doc({ identities: { 'demo-org': { kind: 'org', externalId: 'o-1' } } }), fakeResolver()),
+    BlueprintIdentityError,
+  );
+});
+
+test('parseBlueprint REJECTS a reference to a hyphenated name with a SPECIFIC "not a valid identities reference" message (not "undeclared")', () => {
+  // The name can no longer even be DECLARED (previous test), but the reference-
+  // side check must fire independently and give its own diagnostic — not the
+  // generic "references an undeclared identity" message, which would be
+  // misleading here (the real problem is the shape, not a missing declaration).
+  try {
+    parseBlueprint(minimalBlueprint({ description: '${{ identities.demo-org }}' }));
+    assert.fail('expected throw');
+  } catch (err) {
+    assert.ok(err instanceof BlueprintValidationError);
+    const msg = err.issues.map((i) => i.message).join(' | ');
+    assert.match(msg, /not a valid identities reference/);
+    assert.doesNotMatch(msg, /undeclared/);
+  }
+});
+
+test('parseBlueprint REJECTS dotted property access on an identity reference, even when the name IS declared', () => {
+  try {
+    parseBlueprint(
+      minimalBlueprint({
+        identities: { owner: { kind: 'user', externalId: 'u-1' } },
+        description: '${{ identities.owner.externalId }}',
+      } as Partial<Blueprint>),
+    );
+    assert.fail('expected throw');
+  } catch (err) {
+    assert.ok(err instanceof BlueprintValidationError);
+    const msg = err.issues.map((i) => i.message).join(' | ');
+    assert.match(msg, /property access/);
+    assert.match(msg, /not supported/);
+    // Must name what WOULD work — the bare reference, no trailing property.
+    assert.match(msg, /\$\{\{ identities\.owner \}\}/);
+  }
+});
+
+test('END TO END: resolveBlueprintIdentities leaves a dotted-access token untouched (its own regex cannot match it) — the FOLLOWING parseBlueprint call is what actually catches it', async () => {
+  // Documents the real two-stage pipeline (identities.ts's own header comment):
+  // apply-time resolution runs BEFORE parseBlueprint. A malformed token survives
+  // the first stage unchanged (nothing there recognizes it either), and is
+  // refused loudly by the second — still before any live mutation happens, just
+  // one call-frame later than the purely-offline `validate` path above.
+  const resolved = await resolveBlueprintIdentities(
+    doc({
+      identities: { owner: { kind: 'user', externalId: 'u-1' } },
+      description: '${{ identities.owner.externalId }}',
+    }),
+    fakeResolver(),
+  );
+  assert.equal(
+    (resolved as { description?: string }).description,
+    '${{ identities.owner.externalId }}',
+    'resolveBlueprintIdentities alone does not (and cannot) touch a malformed token',
+  );
+  assert.throws(() => parseBlueprint(resolved), BlueprintValidationError, 'parseBlueprint catches it next');
+});

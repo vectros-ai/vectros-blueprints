@@ -123,7 +123,7 @@ const MEMBER_SHARED_READ_ACTIONS = [
 
 const agenticSdlc: Blueprint = {
   name: 'agentic-sdlc',
-  version: '1.6.0',
+  version: '1.9.0',
   description:
     "A whole-SDLC system of record for an AI development team — decisions, designs, references, runbooks, post-mortems (as documents) plus controls, conventions, gotchas, and a glossary (as records), cross-linked and recalled by meaning.",
 
@@ -995,6 +995,233 @@ const agenticSdlc: Blueprint = {
         { fieldName: 'priority', rangeEnabled: true },
       ],
     },
+    {
+      // A PROPOSED memory, waiting on a verification step — the staging area in
+      // front of the `memory` type above. An agent that distills its own working
+      // sessions produces claims faster than it can check them, and an unchecked
+      // claim is worse than no claim: it is a plausible sentence that will be
+      // recalled as fact. So a proposal lands here, an agent later verifies it,
+      // and only a verified one is written to `memory`.
+      //
+      // ⚠ indexMode NONE IS THE LOAD-BEARING DECISION, not a tuning choice.
+      // Store-only means these records are never indexed, so a search or a
+      // grounded answer CANNOT return them under any query — the separation
+      // between unverified proposals and trusted knowledge is enforced by the
+      // platform rather than by every caller remembering to filter. Make this
+      // HYBRID and the corpus of unchecked claims starts competing with the
+      // curated KB for retrieval slots, which is the one failure this type
+      // exists to prevent. They stay reachable by id and by the two lookups
+      // below, which is all a disposition workflow needs.
+      //
+      // Note the consequence for the fields: `filterable` narrows SEARCH, and
+      // nothing here is searchable, so no field declares it. Query paths are the
+      // lookups, deliberately — a flag that does nothing would just read as
+      // capability that isn't there.
+      typeName: 'candidate',
+      displayName: 'Memory candidate',
+      indexMode: 'NONE',
+      fields: [
+        {
+          fieldId: 'title',
+          fieldType: 'string',
+          required: true,
+          validation: { minLength: 1, maxLength: 200 },
+          description: 'One line naming the claim — what a reviewer reads first.',
+          renderHints: { label: 'Title', widget: 'text', order: 1, displayField: true },
+        },
+        {
+          fieldId: 'body',
+          fieldType: 'string',
+          description: 'The proposed fact in full, as the distiller stated it — the thing to verify.',
+          renderHints: { label: 'Body', widget: 'textarea', order: 2 },
+        },
+        {
+          // Mirrors `memory.kind` exactly, so a verified candidate maps 1:1 onto
+          // the memory it becomes with no vocabulary translation in between.
+          fieldId: 'kind',
+          fieldType: 'enum',
+          enumValues: ['user', 'feedback', 'project', 'reference', 'observation'],
+          description: 'Which flavour of memory this would become — the same vocabulary as `memory.kind`.',
+          renderHints: { label: 'Kind', widget: 'select', order: 3 },
+        },
+        {
+          // The distiller's ROUTING suggestion, and the one field here with no
+          // counterpart on `memory` — because it stops existing the moment the
+          // question it asks is answered. A verified claim either becomes a
+          // memory record or becomes a paragraph in a document; this is the
+          // proposer's guess about which, and the verifier is free to overrule
+          // it (the verdict lands in `disposition`, not here).
+          fieldId: 'dest',
+          fieldType: 'enum',
+          enumValues: ['memory', 'doc'],
+          description: 'Where the proposer thinks this belongs if it survives review — a suggestion, not the verdict.',
+          renderHints: { label: 'Suggested destination', widget: 'select', order: 4 },
+        },
+        {
+          // `area`, `tags` and `sourceRef` below mirror `memory`'s exactly, for
+          // the same reason `kind` does: a verified candidate is COPIED into a
+          // memory, and any field that exists on only one side has to be
+          // re-derived or dropped at exactly the moment a human is deciding
+          // whether the claim is true.
+          fieldId: 'area',
+          fieldType: 'string',
+          description: 'Subsystem/topic the claim applies to (e.g. "auth", "search") — the shared area vocabulary.',
+          renderHints: { label: 'Area', widget: 'text', order: 5 },
+        },
+        {
+          fieldId: 'tags',
+          fieldType: 'array',
+          description: 'Freeform labels carried over from the proposal.',
+          renderHints: { label: 'Tags', order: 6 },
+        },
+        {
+          // Provenance the VERIFIER needs most: checking a claim starts with the
+          // file or issue it is about. A candidate whose sourceRef was dropped
+          // in transit costs the reviewer the search that the proposer had
+          // already done.
+          fieldId: 'sourceRef',
+          fieldType: 'string',
+          description: 'Provenance: the file path / issue / URL the claim is about — where a verifier starts.',
+          renderHints: { label: 'Source ref', widget: 'text', order: 7 },
+        },
+        {
+          fieldId: 'sessionId',
+          fieldType: 'string',
+          description: 'The conversation that proposed it — your runtime\'s session identifier.',
+          renderHints: { label: 'Session', widget: 'text', order: 8 },
+        },
+        {
+          // Also the stable ordering key: a display ordinal is derived by sorting
+          // on this, so proposals keep the numbering a reviewer saw. Nothing is
+          // ever hard-deleted here, which is what keeps that ordering stable.
+          fieldId: 'proposedAt',
+          fieldType: 'date',
+          description: 'ISO-8601 — when it was proposed. Also the stable ordering key for display.',
+          renderHints: { label: 'Proposed at', widget: 'date', order: 9 },
+        },
+        {
+          // THE VERDICT, and deliberately a plain payload field rather than the
+          // record's own ACTIVE/ARCHIVED status. Settling a candidate is
+          // REVERSIBLE — a wrong dismissal has to be undoable — and a write-side
+          // visibility flip is the wrong tool for a reversible state: it is
+          // asynchronous, it moves the record out from under readers, and it
+          // leaves the index status of a once-indexed row stranded. A filterable
+          // payload field flips synchronously and reads the same for everyone.
+          fieldId: 'disposition',
+          fieldType: 'enum',
+          enumValues: ['pending', 'stored', 'documented', 'ignored'],
+          description: 'The verdict: still pending, written to memory, captured in a doc, or dismissed.',
+          renderHints: { label: 'Disposition', widget: 'select', order: 10 },
+        },
+        {
+          fieldId: 'ref',
+          fieldType: 'string',
+          description: 'The citation given when settling it — the record id, document path, or reason.',
+          renderHints: { label: 'Ref', widget: 'text', order: 11 },
+        },
+        {
+          // What the settling step actually CHECKED, which is not always what the
+          // agent typed. Keeping both makes a bad citation auditable after the
+          // fact instead of indistinguishable from a good one.
+          fieldId: 'resolved',
+          fieldType: 'string',
+          description: 'What was verified when it was settled — kept alongside `ref`, which is what was claimed.',
+          renderHints: { label: 'Resolved', widget: 'text', order: 12 },
+        },
+        {
+          fieldId: 'origin',
+          fieldType: 'enum',
+          enumValues: ['session', 'recovered'],
+          description: 'Proposed by a live session, or recovered later from one that ended without settling.',
+          renderHints: { label: 'Origin', widget: 'select', order: 13 },
+        },
+        {
+          fieldId: 'reopenedWhy',
+          fieldType: 'string',
+          description: 'Why a settled candidate was reopened — the audit trail for undoing a verdict.',
+          renderHints: { label: 'Reopened why', widget: 'textarea', order: 14 },
+        },
+        {
+          // The forward half of a correction: this candidate restates an earlier
+          // one whose claim was wrong. Written at create, so it costs nothing.
+          fieldId: 'revises',
+          fieldType: 'reference',
+          targetTypeName: 'candidate',
+          targetSurface: 'record',
+          targetField: 'externalId',
+          cardinality: 'one',
+          description: 'The candidate this one corrects (by externalId).',
+          renderHints: { label: 'Revises', order: 15 },
+        },
+        {
+          // The reverse half, and NOT redundant: "is this still open?" has to be
+          // answerable without asking whether some OTHER record points here, and
+          // there is no reverse-reference read. So the superseded candidate is
+          // marked directly.
+          //
+          // Kept SEPARATE from `disposition` on purpose. Superseded and dismissed
+          // are different facts: a dismissal may be undone, while resurrecting a
+          // claim that a later run already corrected would re-offer the version
+          // known to be wrong. Folding both into one enum makes that distinction
+          // unrepresentable exactly when it matters.
+          fieldId: 'supersededBy',
+          fieldType: 'reference',
+          targetTypeName: 'candidate',
+          targetSurface: 'record',
+          targetField: 'externalId',
+          cardinality: 'one',
+          description: 'The candidate that corrected this one (by externalId) — set on the older record.',
+          renderHints: { label: 'Superseded by', order: 16 },
+        },
+      ],
+      // FOUR lookups, because this type is asked three genuinely different
+      // questions and one of them is a conjunction:
+      //
+      //   `disposition`            — "what is waiting ANYWHERE?" The cross-session
+      //                              review queue. Low cardinality, so its
+      //                              partitions are large; that is inherent to the
+      //                              question and the pending set is small.
+      //   `sessionId`              — "everything belonging to this conversation",
+      //                              settled candidates included.
+      //   (sessionId, disposition) — "what is still waiting IN this conversation".
+      //   `proposedAt` (range)     — worked by age: "what has been sitting
+      //                              longest", "what came in this week". A range
+      //                              read, not a filter over everything ever
+      //                              proposed.
+      //
+      // The composite earns its slot because that third question is the HOTTEST
+      // read in the system — it is what an agent is shown as it works, so it runs
+      // far more often than the queue-wide scan does. Without it the answer is the
+      // more selective single lookup plus a filter in the caller.
+      //
+      // `sessionId` LEADS, and the order is not cosmetic: the leading field
+      // becomes the partition key. Leading with `disposition` would sort every
+      // candidate ever proposed into four partitions; leading with `sessionId`
+      // gives one small partition per conversation. Order is also
+      // migration-locked, so it cannot be corrected later.
+      //
+      // A composite matches a LEADING RUN of its fields, so `(sessionId,
+      // disposition)` also answers `sessionId` alone. The plain `sessionId`
+      // lookup is kept anyway: under a partial tuple the unspecified field
+      // becomes part of the ordering, so results come back grouped by
+      // `disposition` rather than in one sequence — right for a filtered view,
+      // wrong for "this conversation's candidates, oldest first", which is the
+      // read the review surface and the queue/record agreement check both make.
+      // One declaration out of ten is a cheap price for not depending on that
+      // subtlety in the two places that must not be wrong.
+      //
+      // No `sortBy`: it defaults to the record's creation time, which is already
+      // the primary key the review queue orders by. Naming `proposedAt` instead
+      // would order by the WORKER's clock, and that is stamped when a proposal is
+      // queued rather than when it is stored — the two disagree by exactly the
+      // outage a durable queue exists to survive.
+      lookupFields: [
+        'disposition',
+        'sessionId',
+        { fieldNames: ['sessionId', 'disposition'] },
+        { fieldName: 'proposedAt', rangeEnabled: true },
+      ],
+    },
   ],
 
   // Least-privilege, data-plane only. The scope of the `ssk_*` key the bootstrap
@@ -1049,7 +1276,12 @@ const agenticSdlc: Blueprint = {
         // grant (`records:r:memory`) and the inference capability travel in the
         // SAME clause, so grounding works regardless of cross-clause admission
         // semantics. Still self-fenced by dataScope: never another principal's.
-        allowedActions: ['records:cru:memory', 'search:r', 'inference:r'],
+        // `candidate` is READ-only here, unlike `memory`'s full CRU. A candidate's
+        // verdict is the output of a verification step, so it is written by the
+        // agent runtime that performed the check — a human editing the field
+        // directly would record a verdict nothing actually verified. Reading them
+        // is the point: the queue, the verdicts and the corrections are browsable.
+        allowedActions: ['records:cru:memory', 'records:r:candidate', 'search:r', 'inference:r'],
         dataScope: { userId: ['${{ self.userId }}'] },
       },
     ],

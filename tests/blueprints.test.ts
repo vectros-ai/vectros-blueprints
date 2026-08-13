@@ -283,10 +283,11 @@ test('task-management requests exactly the documented least-privilege scopes', (
   assert.ok(!tm.accessProfile.allowedActions.includes('records:d'));
 });
 
-test('agentic-sdlc: 10 schemas split content (documents) vs structure (records) + isolated memory', () => {
+test('agentic-sdlc: 11 schemas split content (documents) vs structure (records) + isolated memory + its staging area', () => {
   const bp = getBlueprint('agentic-sdlc')!;
   const typeNames = bp.schemas.map((s) => s.typeName).sort();
   assert.deepEqual(typeNames, [
+    'candidate',
     'control',
     'convention',
     'decision',
@@ -303,7 +304,7 @@ test('agentic-sdlc: 10 schemas split content (documents) vs structure (records) 
   // Structure-dominant records (typed fields are the artifact). `memory` is a
   // record too, but a DIFFERENT genre — per-principal isolated agent memory (the
   // private tier), distinct from the team's curated shared knowledge above.
-  const records = ['control', 'convention', 'gotcha', 'term', 'memory'];
+  const records = ['control', 'convention', 'gotcha', 'term', 'memory', 'candidate'];
   const byType = new Map(bp.schemas.map((s) => [s.typeName, s]));
   for (const t of documents) {
     assert.deepEqual(byType.get(t)!.allowedSurfaces, ['document'], `${t} must bind the document surface`);
@@ -311,12 +312,90 @@ test('agentic-sdlc: 10 schemas split content (documents) vs structure (records) 
   for (const t of records) {
     assert.equal(byType.get(t)!.allowedSurfaces, undefined, `${t} is a record (defaults to ['record'])`);
   }
-  // Every schema is HYBRID (keyword + semantic recall is the whole pitch).
-  for (const s of bp.schemas) assert.equal(s.indexMode, 'HYBRID', `${s.typeName} should be HYBRID`);
+  /**
+   * Everything RECALLABLE is HYBRID (keyword + semantic recall is the whole pitch)
+   * — and `candidate` is the deliberate exception, not an oversight.
+   *
+   * A candidate is an UNVERIFIED proposal. Store-only (`NONE`) means it is never
+   * indexed, so no search and no grounded answer can return it: the separation
+   * between unchecked claims and curated knowledge is enforced by the platform,
+   * not by every caller remembering a filter. Flip this to HYBRID and the corpus
+   * of unverified claims starts competing with the KB for retrieval slots.
+   *
+   * Asserted as an exhaustive partition rather than a loop with a skip, so ADDING
+   * a schema forces a conscious choice about which side it lands on.
+   */
+  const searchable = bp.schemas.filter((s) => s.typeName !== 'candidate');
+  for (const s of searchable) assert.equal(s.indexMode, 'HYBRID', `${s.typeName} should be HYBRID`);
+  assert.equal(searchable.length, 10, 'exactly one schema is non-searchable');
+  assert.equal(byType.get('candidate')!.indexMode, 'NONE',
+    'candidate MUST be store-only — unverified proposals must never be reachable by search');
   // The retired types from earlier drafts are gone.
   for (const gone of ['handoff', 'incident', 'doc']) {
     assert.ok(!byType.has(gone), `${gone} should no longer be a schema`);
   }
+});
+
+/**
+ * `candidate`'s composite lookup, pinned by SHAPE and by ORDER.
+ *
+ * Both halves are migration-locked once a record is written, and the order is the half a
+ * reader is likely to "tidy". `sessionId` MUST lead: the leading field becomes the partition
+ * key, so leading with `disposition` — a four-value enum — would sort every candidate ever
+ * proposed into four partitions. Reversing the pair is silent (identical field set, valid
+ * declaration, tests that only check membership stay green) and unfixable afterwards, so the
+ * assertion is on the exact array, not on its contents.
+ */
+test('agentic-sdlc: `candidate` declares a (sessionId, disposition) composite lookup, in that order', () => {
+  const bp = getBlueprint('agentic-sdlc')!;
+  const candidate = bp.schemas.find((s) => s.typeName === 'candidate')!;
+  const lookups = candidate.lookupFields ?? [];
+
+  // Narrow to entries that actually carry `fieldNames`, re-stating it as present so the
+  // assertions below read it directly. `Extract<typeof lf, { fieldNames: string[] }>` cannot
+  // do this: the union member declares `fieldNames?`, so extracting on a REQUIRED property
+  // matches no member and collapses to `never` — which then types the whole array as
+  // `never[]` and every read off it as an error. Invisible here until `tsc` is run, because
+  // these suites execute through tsx with the types stripped.
+  const composites = lookups.flatMap((lf) =>
+    typeof lf === 'object' && lf.fieldNames !== undefined
+      ? [{ ...lf, fieldNames: lf.fieldNames }]
+      : [],
+  );
+  assert.equal(composites.length, 1, 'exactly one composite lookup');
+  assert.deepEqual(composites[0].fieldNames, ['sessionId', 'disposition'],
+    'sessionId must LEAD — it becomes the partition key, and the order is migration-locked');
+
+  // No `sortBy`: the default (record creation time) is already the order the review queue
+  // reads in. Naming `proposedAt` would order by the worker's queue-time clock instead.
+  assert.equal(composites[0].sortBy, undefined,
+    'composite must not name a sortBy — the createdAt default is the intended order');
+
+  // The plain `sessionId` lookup is kept DELIBERATELY even though the composite's leading
+  // run also answers it: under a partial tuple the unspecified field joins the ordering, so
+  // results come back grouped by `disposition` rather than as one oldest-first run.
+  const plain = lookups.map((lf) => (typeof lf === 'string' ? lf : (lf as { fieldName?: string }).fieldName));
+  assert.ok(plain.includes('sessionId'),
+    'the plain sessionId lookup must remain — the composite groups a partial tuple, it does not sequence it');
+  assert.ok(plain.includes('disposition'), 'the queue-wide pending lookup must remain');
+
+  // Legs must be declarable AS legs: present, and neither array/object-typed nor rangeEnabled.
+  const fieldsById = new Map(candidate.fields.map((f) => [f.fieldId, f]));
+  for (const leg of composites[0].fieldNames) {
+    const f = fieldsById.get(leg);
+    assert.ok(f, `composite leg '${leg}' must be a declared field`);
+    assert.ok(!['array', 'object'].includes(f!.fieldType), `leg '${leg}' must not be array/object-typed`);
+    const rangeDeclared = lookups.some(
+      (lf) => typeof lf === 'object' && (lf as { fieldName?: string }).fieldName === leg
+        && (lf as { rangeEnabled?: boolean }).rangeEnabled,
+    );
+    assert.equal(rangeDeclared, false, `leg '${leg}' must not also be declared rangeEnabled`);
+  }
+
+  // A composite is record-only at the platform; `candidate` qualifies by omitting surfaces.
+  const surfaces = (candidate as { allowedSurfaces?: string[] }).allowedSurfaces;
+  assert.ok(surfaces === undefined || (surfaces.length === 1 && surfaces[0] === 'record'),
+    'a schema declaring a composite must be record-only');
 });
 
 test('agentic-sdlc: document schemas declare NO typed `title` field (a document carries an intrinsic title)', () => {
@@ -518,6 +597,24 @@ test('agentic-sdlc: the `member` role composes two memory tiers (shared KB + pri
   // together in one clause, so grounding is independent of cross-clause admission.
   assert.ok(priv.allowedActions.includes('inference:r'), 'member can rag_ask/ground over its OWN memory');
 
+  /**
+   * `candidate` is READ-ONLY in the same self-scoped clause — a deliberate asymmetry
+   * against `memory`'s full CRU.
+   *
+   * A candidate's disposition is the OUTPUT of a verification step, so it is written
+   * by the runtime that performed the check. A human editing that field directly
+   * would record a verdict nothing actually verified, which is the one thing the
+   * staging area exists to prevent. Reading is the point: the queue, the verdicts
+   * and the corrections stay browsable.
+   */
+  assert.ok(priv.allowedActions.includes('records:r:candidate'), 'member can browse its own candidates');
+  for (const forbidden of ['records:cru:candidate', 'records:c:candidate', 'records:u:candidate']) {
+    assert.ok(!priv.allowedActions.includes(forbidden),
+      `member must not WRITE candidates (${forbidden}) — a verdict is written by the verifier, not by hand`);
+  }
+  // Self-scoped, so one principal never sees another's proposals — same fence as memory.
+  assert.deepEqual(priv.dataScope, { userId: ['${{ self.userId }}'] });
+
   // No org/team scope is baked in this version (the shared-scope ownership axis
   // is being finalized) — the team tier is a deliberate future addition.
   for (const clause of member!) {
@@ -576,6 +673,99 @@ test('agentic-sdlc: memory keeps a LEAN lookup set — structure axes stay filte
   for (const f of ['area', 'agent', 'status', 'sourceRef']) {
     assert.ok(!lookups.includes(f), `memory.${f} must NOT be a lookup (keep the high-volume write lean)`);
   }
+});
+
+test('agentic-sdlc: candidate carries exactly the lookups its enumerations need — and no filterable flags', () => {
+  const candidate = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'candidate')!;
+  /**
+   * Render each entry to a STABLE IDENTITY — a composite has no `fieldName`, and mapping
+   * straight to `.fieldName` yields `undefined`, which `sort()` shuffles to the end and
+   * `deepEqual` then reports as a mystery element. That is the same shape the CLI's plan
+   * renderer was fixed for; a test is not exempt from it.
+   */
+  // NonNullable: `lookupFields` is optional, and `[number]` cannot index a `| undefined` type.
+  const identity = (l: NonNullable<typeof candidate.lookupFields>[number]) =>
+    typeof l === 'string' ? l : l.fieldNames?.join(',') ?? l.fieldName;
+  const lookups = (candidate.lookupFields ?? []).map(identity);
+  // Three questions, four declarations — the two single-field enumerations ("what is waiting
+  // anywhere?", "what belongs to this conversation?"), the composite that answers the
+  // conjunction of them, and the date range every artifact type here carries.
+  assert.deepEqual([...lookups].sort(),
+    ['disposition', 'proposedAt', 'sessionId', 'sessionId,disposition']);
+  // The range belongs on proposedAt specifically: a review queue is worked by AGE, which
+  // is a range read rather than a filter over everything ever proposed.
+  const ranges = (candidate.lookupFields ?? []).filter((l) => typeof l !== 'string' && l.rangeEnabled);
+  assert.deepEqual(ranges.map((l) => (l as { fieldName: string }).fieldName), ['proposedAt']);
+  /**
+   * NO field declares `filterable`, and that is a consequence of store-only.
+   *
+   * `filterable` is SEARCH metadata — it narrows recall. A `NONE` type is never
+   * indexed, so the flag would be inert: config that reads as a query capability
+   * the type does not have. Contrast `memory` directly above, where the same flags
+   * are load-bearing precisely because it IS searchable.
+   */
+  for (const f of candidate.fields) {
+    assert.ok(!f.filterable, `candidate.${f.fieldId} must not be filterable — the type is never indexed`);
+  }
+});
+
+test('agentic-sdlc: candidate keeps supersession SEPARATE from disposition (they are different facts)', () => {
+  const candidate = getBlueprint('agentic-sdlc')!.schemas.find((s) => s.typeName === 'candidate')!;
+  const byId = new Map(candidate.fields.map((f) => [f.fieldId, f]));
+  // Dismissal is REVERSIBLE; supersession is not. Resurrecting a claim that a later run
+  // already corrected would re-offer the version known to be wrong, so `disposition` must
+  // NOT carry a 'superseded' value — folding them into one enum makes the distinction
+  // unrepresentable exactly when it matters.
+  const disposition = byId.get('disposition')!.enumValues!;
+  assert.deepEqual(disposition, ['pending', 'stored', 'documented', 'ignored']);
+  assert.ok(!disposition.includes('superseded'), 'supersession is not a disposition');
+  // It is a reference instead — both directions, because there is no reverse-reference
+  // read: `revises` is written on the corrector at create, `supersededBy` on the corrected
+  // so "is this still open?" is answerable without asking what points at it.
+  for (const f of ['revises', 'supersededBy']) {
+    assert.equal(byId.get(f)?.fieldType, 'reference', `candidate.${f} is a typed reference`);
+    assert.equal(byId.get(f)?.targetTypeName, 'candidate', `candidate.${f} is a self-reference`);
+    assert.equal(byId.get(f)?.targetSurface, 'record');
+  }
+});
+
+test('agentic-sdlc: candidate.kind mirrors memory.kind exactly (a verified candidate maps 1:1)', () => {
+  const byType = new Map(getBlueprint('agentic-sdlc')!.schemas.map((s) => [s.typeName, s]));
+  const kindOf = (t: string) => byType.get(t)!.fields.find((f) => f.fieldId === 'kind')!.enumValues;
+  // A candidate becomes a memory when it is verified. Divergent vocabularies would put a
+  // translation step in that path, which is where a mapping bug would live.
+  assert.deepEqual(kindOf('candidate'), kindOf('memory'));
+});
+
+test('agentic-sdlc: candidate and memory agree on every field they share (promotion is a copy, not a translation)', () => {
+  const byType = new Map(getBlueprint('agentic-sdlc')!.schemas.map((s) => [s.typeName, s]));
+  const cand = new Map(byType.get('candidate')!.fields.map((f) => [f.fieldId, f]));
+  const mem = new Map(byType.get('memory')!.fields.map((f) => [f.fieldId, f]));
+
+  /**
+   * THE CARRY-OVER SET IS PINNED BY NAME, not computed from the intersection — and that
+   * is the whole point of the test.
+   *
+   * Verifying a candidate COPIES it into a memory. Any field the proposer filled in that
+   * `candidate` does not model is dropped in transit, and it is dropped at the worst
+   * possible moment: a reviewer decides whether the claim is true, and the provenance
+   * that would settle it (`sourceRef`, `area`) is the part that went missing. A test
+   * written as "for each shared field, the types agree" would pass trivially on a
+   * `candidate` that had quietly stopped modelling any of them — the intersection would
+   * just get smaller. So the list is stated.
+   */
+  const shared = [...cand.keys()].filter((k) => mem.has(k)).sort();
+  assert.deepEqual(shared, ['area', 'body', 'kind', 'sourceRef', 'supersededBy', 'tags', 'title']);
+
+  for (const id of shared) {
+    assert.equal(cand.get(id)!.fieldType, mem.get(id)!.fieldType,
+      `candidate.${id} and memory.${id} must be the same type — a promotion that has to convert is a mapping bug waiting to happen`);
+  }
+
+  // `dest` is the one field with no counterpart, and legitimately so: it asks WHICH tier
+  // this belongs in, a question that stops existing once the answer is acted on.
+  assert.ok(!mem.has('dest'), 'dest is a candidate-only question');
+  assert.deepEqual(cand.get('dest')!.enumValues, ['memory', 'doc']);
 });
 
 test('agentic-sdlc: every status/severity/criticality/docType enum is pinned (drift breaks documented queries)', () => {
@@ -1028,20 +1218,30 @@ test('composite lookup: a schema with NO composite is unaffected by the allowedS
   assert.doesNotThrow(() => parseBlueprint(withLookup(['status'], ['document'])));
 });
 
-test('composite lookup: no BUNDLED blueprint declares one yet (deliberately deferred content decision)', () => {
-  // The format/schema support landed here; whether any bundled blueprint should actually USE a
-  // composite is a separate, deliberate content decision not made in this change. Pin the
-  // negative so that decision, when made, is a visible diff here — not a silent side effect.
+test('composite lookup: the BUNDLED adoption inventory is exactly one, and enumerated', () => {
+  /**
+   * This pin was previously "no bundled blueprint declares one yet" — the negative held while
+   * the format support landed and the content decision was deliberately deferred. That decision
+   * has now been made for ONE schema (`agentic-sdlc.candidate`, over `sessionId` +
+   * `disposition`), so the pin becomes an INVENTORY rather than a prohibition.
+   *
+   * Kept as an exhaustive list on purpose. Each composite costs one of a schema's ten permanently
+   * migration-locked lookup declarations, so adoption is a decision that should show up as a diff
+   * in this file every single time — which a "0 or more" assertion would stop doing the moment the
+   * first one landed.
+   */
+  const declared: string[] = [];
   for (const b of BUNDLED_BLUEPRINTS) {
     for (const s of b.schemas) {
       for (const lf of s.lookupFields ?? []) {
-        assert.ok(
-          typeof lf === 'string' || lf.fieldNames === undefined,
-          `${b.name}.${s.typeName} declares a composite lookup — if intentional, update this pin`,
-        );
+        if (typeof lf !== 'string' && lf.fieldNames !== undefined) {
+          declared.push(`${b.name}.${s.typeName}:${lf.fieldNames.join(',')}`);
+        }
       }
     }
   }
+  assert.deepEqual(declared.sort(), ['agentic-sdlc.candidate:sessionId,disposition'],
+    'a new bundled composite must be added here deliberately — one of ten migration-locked slots');
 });
 
 /** Capture a thrown BlueprintValidationError (mirrors error-format.test.ts). */

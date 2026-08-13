@@ -288,6 +288,38 @@ test('substitutes tokens deep in nested objects + arrays (schemas, seed records)
   assert.deepEqual(r.seed[1].fields.tags, ['Acme', 'static']);
 });
 
+// A worked example an installer supplies their Auth0 domain/audience via
+// --set, with zero edits to the shared blueprint file. `issuers` gets this for
+// free from the generic deep-walk above — this pins that explicitly, since
+// this was the first real exercise of `inputs:` end to end and needs
+// dedicated integration coverage.
+test('resolves ${{ inputs.* }} tokens inside a top-level issuers entry', () => {
+  const r = resolved(
+    doc({
+      contextId: 'casework',
+      inputs: {
+        auth0Domain: { type: 'string', required: true },
+        auth0Audience: { type: 'string', required: true },
+      },
+      issuers: [
+        {
+          issuerId: 'primary',
+          issuer: 'https://${{ inputs.auth0Domain }}/',
+          jwksUri: 'https://${{ inputs.auth0Domain }}/.well-known/jwks.json',
+          audience: '${{ inputs.auth0Audience }}',
+          contextId: 'casework',
+        },
+      ],
+    }),
+    { auth0Domain: 'your-tenant.us.auth0.com', auth0Audience: 'https://api.your-app.example.com' },
+  );
+  assert.equal(r.issuers[0].issuer, 'https://your-tenant.us.auth0.com/');
+  assert.equal(r.issuers[0].jwksUri, 'https://your-tenant.us.auth0.com/.well-known/jwks.json');
+  assert.equal(r.issuers[0].audience, 'https://api.your-app.example.com');
+  // Untemplated fields pass through unchanged.
+  assert.equal(r.issuers[0].issuerId, 'primary');
+});
+
 test('object KEYS are NOT substituted — only values', () => {
   const r = resolved(
     doc({
@@ -446,4 +478,75 @@ test('self.* coexists with inputs: inputs resolve, self is preserved, inputs blo
 
 test('a genuinely-unknown namespace still errors (deferral is allow-listed, not open)', () => {
   assert.throws(() => resolved(doc({ description: '${{ bogus.x }}' })), BlueprintInputError);
+});
+
+// ── deferred namespaces, N-segment paths: ${{ self.scope.org }} / ${{ under.self.userId }} ──
+
+test('self.*: a whole-value N-segment ${{ self.scope.org }} token is left literal', () => {
+  const r = resolved(
+    doc({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:r'], dataScope: { 'scope:org': ['${{ self.scope.org }}'] } }],
+      },
+    }),
+  );
+  assert.equal(r.roles.hr_admin[0].dataScope['scope:org'][0], '${{ self.scope.org }}');
+});
+
+test('under.*: a whole-value ${{ under.self.userId }} token is left literal', () => {
+  const r = resolved(
+    doc({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:r'], dataScope: { 'scope:org': ['${{ under.self.userId }}'] } }],
+      },
+    }),
+  );
+  assert.equal(r.roles.hr_admin[0].dataScope['scope:org'][0], '${{ under.self.userId }}');
+});
+
+test('the real casework shape: a two-entry dataScope list mixing under.self.* and self.scope.<ns>', () => {
+  const r = resolved(
+    doc({
+      roles: {
+        hr_admin: [
+          {
+            allowedActions: ['records:r'],
+            dataScope: { 'scope:org': ['${{ under.self.userId }}', '${{ self.scope.org }}'] },
+          },
+        ],
+      },
+    }),
+  );
+  assert.deepEqual(r.roles.hr_admin[0].dataScope['scope:org'], [
+    '${{ under.self.userId }}',
+    '${{ self.scope.org }}',
+  ]);
+});
+
+test('self.*: an N-segment token embedded mid-string is re-emitted verbatim (interpolate path)', () => {
+  const r = resolved(doc({ description: 'owner org=${{ self.scope.org }} ok' }));
+  assert.equal(r.description, 'owner org=${{ self.scope.org }} ok');
+});
+
+test('under.*: an N-segment token embedded mid-string is re-emitted verbatim (interpolate path)', () => {
+  const r = resolved(doc({ description: 'founder=${{ under.self.userId }} ok' }));
+  assert.equal(r.description, 'founder=${{ under.self.userId }} ok');
+});
+
+test('a namespace that is a textual PREFIX of a deferred one, but not equal, still errors', () => {
+  // "selfish" starts with "self" but is not the "self" namespace — must not false-positive
+  // against the deferred-namespace match.
+  assert.throws(() => resolved(doc({ description: '${{ selfish.userId }}' })), BlueprintInputError);
+});
+
+test('a non-deferred multi-segment token (inputs.foo.bar) still errors as malformed, not swept up', () => {
+  assert.throws(
+    () => resolved(doc({ inputs: { foo: { type: 'string' } }, description: '${{ inputs.foo.bar }}' }), { foo: 'x' }),
+    BlueprintInputError,
+  );
+});
+
+test('escape form still works for the new N-segment shape: $${{ self.scope.org }} → literal', () => {
+  const r = resolved(doc({ description: 'literal: $${{ self.scope.org }}' }));
+  assert.equal(r.description, 'literal: ${{ self.scope.org }}');
 });

@@ -167,3 +167,63 @@ test('self: REJECTS ${{ self.* }} in a seed record field (never resolves there)'
   );
   assert.ok(paths.some((p) => p.startsWith('seed')), `expected a seed issue, got ${JSON.stringify(paths)}`);
 });
+
+// The placement lint's own SELF_TOKEN_RE must stay in lockstep with the deeper
+// dotted-path grammar inputs.ts's DEFERRED_INNER_RE resolves (self.scope.<ns>,
+// under.self.<field>) — a strict single-segment match would silently miss these
+// forms wherever they're misplaced, the same failure mode IDENTITY_REF_LOOSE_RE
+// exists to prevent for identities.* below.
+
+test('self: ACCEPTS a multi-segment ${{ self.scope.org }} inside a role clause dataScope', () => {
+  const bp = parseBlueprint(
+    minimal({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:r:case'], dataScope: { 'scope:org': ['${{ self.scope.org }}'] } }],
+      },
+    } as Partial<Blueprint>),
+  );
+  assert.equal(bp.roles?.hr_admin[0].dataScope?.['scope:org'][0], '${{ self.scope.org }}');
+});
+
+test('self: ACCEPTS ${{ under.self.userId }} inside a role clause dataScope', () => {
+  const bp = parseBlueprint(
+    minimal({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:r:case'], dataScope: { 'scope:org': ['${{ under.self.userId }}'] } }],
+      },
+    } as Partial<Blueprint>),
+  );
+  assert.equal(bp.roles?.hr_admin[0].dataScope?.['scope:org'][0], '${{ under.self.userId }}');
+});
+
+test('self: REJECTS a multi-segment ${{ self.scope.org }} in a seed record field', () => {
+  const paths = issuePaths(
+    minimal({
+      seed: [
+        { surface: 'record', typeName: 'task', externalId: 'seed-1', fields: { owner: '${{ self.scope.org }}' } },
+      ],
+    }),
+  );
+  assert.ok(paths.some((p) => p.startsWith('seed')), `expected a seed issue, got ${JSON.stringify(paths)}`);
+});
+
+test('self: REJECTS ${{ under.self.userId }} in a seed record field', () => {
+  const paths = issuePaths(
+    minimal({
+      seed: [
+        { surface: 'record', typeName: 'task', externalId: 'seed-1', fields: { owner: '${{ under.self.userId }}' } },
+      ],
+    }),
+  );
+  assert.ok(paths.some((p) => p.startsWith('seed')), `expected a seed issue, got ${JSON.stringify(paths)}`);
+});
+
+test('self: REJECTS ${{ under.self.userId }} in accessProfile.dataScope', () => {
+  const paths = issuePaths(
+    minimal({ accessProfile: { allowedActions: ['records:r'], dataScope: { 'scope:org': ['${{ under.self.userId }}'] } } }),
+  );
+  assert.ok(
+    paths.some((p) => p.startsWith('accessProfile.dataScope')),
+    `expected an accessProfile.dataScope issue, got ${JSON.stringify(paths)}`,
+  );
+});
