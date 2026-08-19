@@ -144,6 +144,10 @@ const clinicalIntake: Blueprint = {
   // and NO inference:r (we never point a RAG capability at a PHI corpus here).
   accessProfile: {
     allowedActions: ['records:r', 'records:c', 'records:u', 'search:r', 'schemas:r'],
+    // dataScope: {} (present, empty) is the deliberate marker for tenant-wide
+    // reach, unchanged from this demo's original intent — a real clinical
+    // deployment should scope this (e.g. `scope:org`) before handling real PHI.
+    dataScope: {},
   },
 
   servicePrincipal: {

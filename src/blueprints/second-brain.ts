@@ -112,6 +112,10 @@ const secondBrain: Blueprint = {
   // records:d: notes are archived (status → 'archived'), never deleted.
   accessProfile: {
     allowedActions: ['records:r', 'records:c', 'records:u', 'search:r', 'schemas:r', 'inference:r'],
+    // dataScope: {} (present, empty) is the deliberate marker for tenant-wide
+    // reach — this is a single personal-knowledge-base credential with one
+    // holder, not a multi-owner shared resource to isolate.
+    dataScope: {},
   },
 
   servicePrincipal: {

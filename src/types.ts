@@ -310,6 +310,78 @@ const BlueprintSchemaSchema = z
     }
   });
 
+// Capability-name grammar — mirrors the platform's PUBLIC grammar
+// (`Capability.NAME_PATTERN`): lowercase, kebab-case, no colon, never `'*'`.
+// This is the STRUCTURAL shape only. Deliberately NOT the closed set of
+// grantable names (e.g. `'member-lifecycle'`) — that set is a platform
+// property that moves as new capabilities ship ("a capability that cannot be
+// given a clear name gets split, or is not created" is the platform's own
+// admission test for minting one), and baking a copy of it into a published
+// package guarantees the next new entry finds a stale mirror here — the same
+// failure mode as any grammar hand-transcribed into several places with
+// nothing checking any copy against its source. The closed-set /
+// not-yet-enforced checks are the CLI scope gate's job, against the live
+// registry, at apply time — a separate package, out of scope for this format
+// layer.
+const CAPABILITY_NAME_RE = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * A `capabilities` list — format passthrough to the platform's
+ * `granted_capabilities` (`ScopeClause.capabilities`). Structural validation
+ * only, mirroring the SHAPE half of the platform's own per-entry grammar check
+ * (blank / `'*'` / colon / case / duplicate) — deliberately NOT its
+ * closed-registry lookup, which only the platform can answer without going
+ * stale (see `CAPABILITY_NAME_RE` above). A well-formed but unrecognized name
+ * (a typo, or a name from a newer platform release) parses here without
+ * error — same forward-compatible posture this package already takes with
+ * `allowedActions`.
+ *
+ * ⚠️ THIS PACKAGE ENFORCES NOTHING. A successful parse is not the same as
+ * the capability being granted: whether an unrecognized or not-yet-grantable
+ * name is actually rejected depends entirely on whether the CLIENT consuming
+ * this package reads `capabilities` at all and checks it against the live
+ * platform registry before minting anything. A client that does not (yet)
+ * read this field will silently ignore a declared grant, with no error at
+ * any layer — do not assume `capabilities` has any effect until you have
+ * confirmed your client's own release notes say it does.
+ */
+const GrantedCapabilitiesSchema = z
+  .array(z.string().min(1))
+  .optional()
+  .superRefine((caps, ctx) => {
+    if (!caps) return;
+    const seen = new Set<string>();
+    caps.forEach((name, i) => {
+      // Blank already gets its own issue from the array item schema's
+      // `.min(1)` above — don't pile a second, redundant "not a valid name"
+      // issue onto the same index.
+      if (name === '') return;
+      if (name === '*') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i],
+          message:
+            "'*' is not a capability — granted_capabilities has no wildcard, and a '*' in allowedActions " +
+            'confers zero capabilities. Name each capability explicitly.',
+        });
+      } else if (!CAPABILITY_NAME_RE.test(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i],
+          message: `'${name}' is not a valid capability name (expected lowercase letters, digits and hyphens, starting with a letter, and no ':' — a capability is not an action)`,
+        });
+      }
+      if (seen.has(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i],
+          message: `'${name}' is declared more than once`,
+        });
+      }
+      seen.add(name);
+    });
+  });
+
 const BlueprintAccessProfileSchema = z
   .object({
     // Validated structurally here; the SCOPE GATE (in @vectros-ai/cli) is
@@ -343,12 +415,34 @@ const BlueprintAccessProfileSchema = z
     // docstring); this `.min(1)` is only the shape-level "non-blank" guard on
     // the value, not the grammar check.
     identityOverrides: z.record(z.string().min(1)).optional(),
+    // Optional capabilities granted to the blueprint's own service-principal
+    // profile. DECISION: allowed here, not role-clause-only. On the platform,
+    // an access profile's scopes are themselves a list of clauses — the exact
+    // same wire shape a role clause carries — and the loader already builds
+    // this profile as ONE such clause. Refusing `capabilities` here while
+    // allowing it on a role clause would be an asymmetry this FORMAT package
+    // has no basis to invent: nothing on the platform side distinguishes the
+    // two, and whether granting a capability to a blueprint's own service key
+    // is sound POLICY is exactly the question the CLI's scope gate exists to
+    // answer (a separate package, out of scope for this format layer) — the
+    // same posture this package already takes with `allowedActions` above.
+    //
+    // Worth naming for whoever writes that gate: this profile is a long-lived,
+    // non-human-attributable machine credential (typically stored in CI/CD
+    // secrets), not an ephemeral human session — a materially different
+    // blast-radius question from granting the same capability to a role that
+    // a person is bound to. The gate should weigh the two separately rather
+    // than reuse one policy for both.
+    capabilities: GrantedCapabilitiesSchema,
   })
   .strict();
 
-// A single role clause — mirrors the platform/SDK ScopeClause (allowedActions +
-// optional per-clause dataScope). Multi-clause roles let one role grant several
-// (action-set, data-scope) rules at once, evaluated per-clause server-side.
+// A single role clause — mirrors the platform/SDK ScopeClause, now THREE-part:
+// allowedActions + optional per-clause dataScope + optional per-clause
+// capabilities (`allowed_actions` / `data_scope` / `granted_capabilities` on
+// the wire — `ScopeClause.java:36`). Multi-clause roles let one role grant
+// several (action-set, data-scope, capability-set) rules at once, evaluated
+// per-clause server-side.
 // `${{ self.* }}` placeholders are legal in a clause's dataScope: they are a
 // RUNTIME sentinel the platform resolves per-principal at request time
 // — the install-time resolver leaves them literal (see inputs.ts),
@@ -359,6 +453,7 @@ const BlueprintRoleClauseSchema = z
   .object({
     allowedActions: z.array(z.string().min(1)).min(1),
     dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    capabilities: GrantedCapabilitiesSchema,
   })
   .strict();
 
@@ -376,7 +471,7 @@ const IDENTITY_NAMESPACE_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const FORBIDDEN_IDENTITY_NAMESPACES = new Set(['record', 'document', 'entity', 'user']);
 
 // A declared identity's `kind`: the fixed `user` surface, OR an entity namespace
-// (`org`/`client` — built-in — or one you registered). Orgs and clients fold into
+// (`org`/`client` — reserved, not built-in — or one you registered). Orgs and clients fold into
 // the generic identity-entity model, so the closed `user|org|client`
 // enum generalizes to any entity-backed namespace. `user` is the one fixed surface
 // that is not a namespace; the reserved surface words are rejected as kinds.
@@ -456,7 +551,7 @@ const ISSUER_ID_RE = CONTEXT_ID_RE;
 // without a transform.
 const BlueprintIssuerSchema = z
   .object({
-    /** Short slug identifying this issuer within your tenant. Immutable once registered. */
+    /** Short slug identifying this issuer within your account. Immutable once registered. */
     issuerId: z.string().regex(ISSUER_ID_RE, {
       message:
         "issuerId must be 3-31 chars, start with a lowercase letter, then lowercase letters/digits/dashes (e.g. 'auth0-prod')",
@@ -472,7 +567,12 @@ const BlueprintIssuerSchema = z
      * this as an ordinary per-API/application default).
      */
     audience: z.string().min(1),
-    /** Which app context an exchanged token targets. Must be an existing app context. */
+    /**
+     * Which app context an exchanged token targets. **Must equal the blueprint's own
+     * `contextId`** — an issuer is a trust anchor, so a blueprint may only attach one to the
+     * context it actually provisions. One IdP account serving several contexts needs one entry
+     * per context, each in that context's own blueprint.
+     */
     contextId: z.string().regex(CONTEXT_ID_RE, {
       message:
         "contextId must be 3-31 chars, start with a lowercase letter, then lowercase letters/digits/dashes (e.g. 'casework')",
@@ -507,6 +607,239 @@ const BlueprintIssuerSchema = z
       .optional(),
   })
   .strict();
+
+/**
+ * A namespace this blueprint needs REGISTERED before anything can reference it
+ * via `scope:<namespace>`, use it as a `dataScope`/`identityOverrides` key, or
+ * create entities in it. Closely mirrors the platform's own `NamespaceRequest`
+ * wire shape (0.40.0's namespace-registration change) — see that endpoint's
+ * own docs for the full semantics; this is authoring-time validation only.
+ *
+ * `org`/`client` are reserved namespace names, not built-ins — registered
+ * the same way as any other name, with no permanent exclusion. A
+ * context-owned `org` registration is exactly as valid as a context-owned
+ * `team` registration. They DO already exist tenant-wide in every account
+ * (`specificityRank` 1000/2000, below) — a context-owned registration of
+ * either needs a different rank, and shadows the tenant-wide one for this
+ * context's own callers.
+ *
+ * **Always registered OWNED by this blueprint's own `contextId`** — there is
+ * deliberately no tenant-wide option here, unlike the platform's own
+ * `NamespaceRequest` (which supports one via an omitted `contextId`). A
+ * blueprint applies under the CLI's bootstrap credential, and the platform's
+ * namespace-registration endpoint confines it to its own context
+ * unconditionally (even for a tenant-wide `contextId: null` request) — the
+ * same confinement issuer registration already has (an untrusted blueprint's
+ * declared namespace must land only in the context IT provisions, never
+ * elsewhere in the tenant). A tenant-wide registration is reachable only with
+ * a root API key, outside any blueprint. If you need one, register it
+ * directly against the API rather than through `namespaces:` here.
+ *
+ * Applied in the BOOTSTRAP-token phase (same as `issuers` — registration
+ * requires the platform's `provisioning:c` capability, which only the
+ * bootstrap credential carries; see the CLI loader), before schemas/seed,
+ * since an `entityBacked` namespace's entities and an `allowedSurfaces:
+ * ['entity']` schema both need the registration to already exist.
+ */
+const BlueprintNamespaceSchema = z
+  .object({
+    /** The namespace to register — same grammar as a `scope:<namespace>` key. */
+    namespace: z.string().min(1),
+    /**
+     * When `true`, every value in this namespace must resolve to an existing
+     * identity entity (create via `entities:c` at the in-context phase, or a
+     * declared `identities:` entry). When `false`/omitted, values are
+     * free-form strings validated by grammar only.
+     */
+    entityBacked: z.boolean().optional(),
+    /**
+     * This namespace's position in your account's specificity order (used to
+     * break a tie when a caller holds two scope dimensions at once). Required
+     * by the platform on registration; MUST be unique across every namespace
+     * in the account, including `org` (1000) and `client` (2000) — pick a
+     * value outside that pair, and outside any other namespace this same
+     * account might register (its own, or another blueprint's).
+     */
+    specificityRank: z.number().int().min(0).max(1_000_000),
+    /**
+     * Optional membership backing — declares which record type + field hold
+     * grants of THIS namespace's values. Supply together with
+     * `membershipTargetField`, or omit both. Declaring this grants nobody
+     * anything on its own: a role opts in explicitly with
+     * `${{ member.scope.<namespace> }}` in its `dataScope`.
+     */
+    membershipRecordType: z.string().min(1).optional(),
+    /** The field on `membershipRecordType` naming the user a grant is FOR. Required alongside `membershipRecordType`. */
+    membershipTargetField: z.string().min(1).optional(),
+    /**
+     * The field on `membershipRecordType` naming a grant's LEVEL, so the same
+     * user can hold different levels in different values of this namespace.
+     * Supply together with `membershipLevels`, or omit both for plain
+     * in-or-out membership.
+     */
+    membershipLevelField: z.string().min(1).optional(),
+    /** The complete set of level labels this namespace allows. Required alongside `membershipLevelField`. */
+    membershipLevels: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+/**
+ * `namespaces[]` validation: grammar (mirrors `scopeNamespaceGrammarError`,
+ * the same table `dataScope`/`identityOverrides` keys are checked against
+ * below — one grammar, not a second copy; `org`/`client` are reserved
+ * names, not built-ins, checked the same as any other), the membership field
+ * co-occurrence rules the platform's own `NamespaceRequest` documents,
+ * `specificityRank` uniqueness WITHIN this blueprint (a partial check — the
+ * platform is the only party that can see the rest of the account's
+ * namespaces, including `org`=1000/`client`=2000, so a collision with those
+ * or another blueprint's registration still surfaces at apply, same as the
+ * platform's own non-idempotent-registration collision), and `namespace`
+ * uniqueness within this blueprint's own list.
+ */
+/** The platform's own DDB-key-embeddable identifier grammar — 1-64 chars, letters/digits/underscore/hyphen. */
+const MEMBERSHIP_FIELD_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function lintNamespaces(value: unknown, ctx: z.RefinementCtx): void {
+  if (!value || typeof value !== 'object' || !('namespaces' in value)) return;
+  const namespaces = (value as { namespaces?: unknown }).namespaces;
+  if (!Array.isArray(namespaces)) return;
+  // For the membershipRecordType-names-an-own-schema check below — the ONE
+  // case a blueprint's namespaces[] can act on data it did not itself bring:
+  // membership resolution reads whatever record type is named here, and
+  // that record type's OWNER (whether created by this blueprint or already
+  // present in the target context) is never re-derived — it is the pack's
+  // say-so alone. Requiring the type to be one of THIS blueprint's own
+  // schemas keeps the reach bounded to what the blueprint ships, the same
+  // "never mint on the pack's say-so alone" principle scope-gate.ts's
+  // KNOWN_CONTROL_PLANE_RESOURCES note draws for this same feature.
+  const rawSchemas = (value as { schemas?: unknown }).schemas;
+  const declaredSchemaTypes = new Set(
+    (Array.isArray(rawSchemas) ? rawSchemas : [])
+      .map((s: unknown) => (s && typeof s === 'object' && 'typeName' in s ? (s as { typeName: unknown }).typeName : undefined))
+      .filter((t): t is string => typeof t === 'string'),
+  );
+  const seenNames = new Set<string>();
+  const seenRanks = new Map<number, number>();
+  namespaces.forEach((entry, i) => {
+    if (!entry || typeof entry !== 'object') return;
+    const ns = entry as {
+      namespace?: unknown;
+      specificityRank?: unknown;
+      membershipRecordType?: unknown;
+      membershipTargetField?: unknown;
+      membershipLevelField?: unknown;
+      membershipLevels?: unknown;
+    };
+    const path = ['namespaces', i] as const;
+    if (typeof ns.namespace === 'string') {
+      const err = scopeNamespaceGrammarError(ns.namespace);
+      if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, 'namespace'], message: err });
+      if (seenNames.has(ns.namespace)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [...path, 'namespace'],
+          message: `'${ns.namespace}' is declared more than once in namespaces[]`,
+        });
+      }
+      seenNames.add(ns.namespace);
+    }
+    if (typeof ns.specificityRank === 'number') {
+      const prior = seenRanks.get(ns.specificityRank);
+      if (prior !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [...path, 'specificityRank'],
+          message: `specificityRank ${ns.specificityRank} is already used by namespaces[${prior}] — every namespace's rank must be unique`,
+        });
+      }
+      seenRanks.set(ns.specificityRank, i);
+    }
+    const hasRecordType = ns.membershipRecordType !== undefined;
+    const hasTargetField = ns.membershipTargetField !== undefined;
+    if (hasRecordType !== hasTargetField) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, 'membershipRecordType'],
+        message: 'membershipRecordType and membershipTargetField must be declared together, or neither',
+      });
+    }
+    if (typeof ns.membershipRecordType === 'string' && !declaredSchemaTypes.has(ns.membershipRecordType)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, 'membershipRecordType'],
+        message:
+          `membershipRecordType '${ns.membershipRecordType}' must name a typeName this blueprint declares in ` +
+          `schemas[] — a namespace's membership can only resolve over a record type the blueprint itself ships, ` +
+          `never a type that merely happens to already exist in the target context.`,
+      });
+    }
+    // membershipRecordType/membershipTargetField/membershipLevelField are each
+    // validated by the platform as a DDB-key-embeddable identifier (1-64 chars,
+    // letters/digits/underscore/hyphen) — the same grammar a schema fieldId or
+    // lookup fieldName uses, distinct from a namespace/level's own grammar. Not
+    // checking this client-side is the same "lints clean, 400s at apply" class
+    // the rest of this function exists to prevent.
+    for (const [field, value] of [
+      ['membershipRecordType', ns.membershipRecordType],
+      ['membershipTargetField', ns.membershipTargetField],
+      ['membershipLevelField', ns.membershipLevelField],
+    ] as const) {
+      if (typeof value === 'string' && !MEMBERSHIP_FIELD_NAME_RE.test(value)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [...path, field],
+          message: `${field} '${value}' is invalid — must be 1-64 characters of letters, digits, underscores, or hyphens`,
+        });
+      }
+    }
+    const hasLevelField = ns.membershipLevelField !== undefined;
+    // Matches the platform's own definition exactly (levels != null &&
+    // !levels.isEmpty()) — an EMPTY array is "no levels declared", the same
+    // as omitting the key entirely, not "levels declared, zero of them".
+    // `!== undefined` alone disagreed: `{ membershipLevelField: 'x',
+    // membershipLevels: [] }` linted clean (both "present") but 400'd at
+    // apply (the platform's all-or-nothing check saw the field with no
+    // labels) — exactly the "lints clean, fails at apply" class this rule
+    // exists to prevent.
+    const hasLevels = Array.isArray(ns.membershipLevels) && ns.membershipLevels.length > 0;
+    if (hasLevelField !== hasLevels) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, 'membershipLevelField'],
+        message: 'membershipLevelField and a non-empty membershipLevels must be declared together, or neither',
+      });
+    }
+    if ((hasLevelField || hasLevels) && !hasRecordType) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, 'membershipLevelField'],
+        message: 'membershipLevelField/membershipLevels require membershipRecordType + membershipTargetField too',
+      });
+    }
+    if (Array.isArray(ns.membershipLevels)) {
+      const seenLevels = new Set<string>();
+      for (const level of ns.membershipLevels) {
+        if (typeof level !== 'string') continue;
+        const err = scopeNamespaceGrammarError(level);
+        if (err) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...path, 'membershipLevels'],
+            message: `level '${level}': ${err}`,
+          });
+        } else if (seenLevels.has(level)) {
+          // Matches the platform's own duplicate-level rejection.
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...path, 'membershipLevels'],
+            message: `membershipLevels contains '${level}' twice`,
+          });
+        }
+        seenLevels.add(level);
+      }
+    }
+  });
+}
 
 // A seed pre-populates the context at bootstrap. It is a DISCRIMINATED union on
 // `surface`, because the two surfaces are genuinely different shapes — not the
@@ -576,15 +909,24 @@ const BlueprintSeedRecordSchema = z.discriminatedUnion('surface', [
 // running on the already-input-resolved doc (the install-time resolver
 // leaves these tokens literal — see inputs.ts).
 //
+// `member.*` joins this lint for the same reason (#936 R39, PM cold-pass finding
+// 2026-08-18): `${{ member.scope.<ns> }}` (and its `:<level>` selector form) is
+// the equivalent runtime per-membership placeholder, resolved server-side by
+// `NamespaceMembershipResolver` — also only meaningful inside a role's
+// dataScope, so a misplaced/typo'd one gets the same teach-by-error here that
+// self/under already got. (inputs.ts's DEFERRED_NAMESPACES gained the matching
+// entry in the same commit, so the token also survives install-time resolution
+// to reach this lint and the server at all.)
+//
 // Broader than a strict single-segment match — the runtime grammar allows
-// deeper dotted paths (`self.scope.<ns>`, `under.self.<field>` — see
-// inputs.ts's DEFERRED_NAMESPACES), so a strict `self\.[A-Za-z_]\w*` shape
+// deeper dotted paths (`self.scope.<ns>`, `under.self.<field>`, `member.scope.<ns>`
+// — see inputs.ts's DEFERRED_NAMESPACES), so a strict `self\.[A-Za-z_]\w*` shape
 // would silently miss them. Same reasoning as IDENTITY_REF_LOOSE_RE below:
-// captures ANYTHING between the `self.`/`under.` prefix and the closing
+// captures ANYTHING between the `self.`/`under.`/`member.` prefix and the closing
 // `}}` (never crossing a literal `}`), so a token this lint's narrower form
 // couldn't parse is still DETECTED here rather than silently invisible —
 // landing as a dead, unresolved literal wherever it was misplaced.
-const SELF_TOKEN_RE = /\$\{\{\s*(?:self|under)\.[^}]*?\s*\}\}/;
+const SELF_TOKEN_RE = /\$\{\{\s*(?:self|under|member)\.[^}]*?\s*\}\}/;
 
 function lintSelfTokenPlacement(value: unknown, ctx: z.RefinementCtx): void {
   const walk = (node: unknown, path: (string | number)[], inRoleDataScope: boolean): void => {
@@ -594,7 +936,7 @@ function lintSelfTokenPlacement(value: unknown, ctx: z.RefinementCtx): void {
           code: z.ZodIssueCode.custom,
           path,
           message:
-            "'${{ self.* }}' is a runtime per-principal placeholder — it is only valid inside a roles[].dataScope value",
+            "'${{ self.* }}' / '${{ member.* }}' is a runtime placeholder — it is only valid inside a roles[].dataScope value",
         });
       }
       return;
@@ -965,14 +1307,94 @@ function lintSeedSurfaces(value: unknown, ctx: z.RefinementCtx): void {
 }
 
 /**
+ * A schema bound to the `user` surface can never be applied by a blueprint.
+ *
+ * WHY THIS IS A LINT AND NOT A RUNTIME SURPRISE. Without it, `blueprint validate` passes such a schema
+ * and `blueprint plan` previews it as provisionable, while the apply fails with a 403 every time — the
+ * author finds out against a live tenant, with no way to have known earlier. This performs the platform's
+ * own authorization check at author time instead.
+ *
+ * WHY ONLY `user`, AND NOT `entity`. A user is account-global: it is the same person across every one of
+ * your app contexts, so its schema has no single context that could own it, lives account-wide, and can
+ * only be written with a root API key. A blueprint never applies with one. An `entity` schema is
+ * different — it is owned by the app context that creates it, which is exactly the context a blueprint
+ * applies into, so a blueprint CAN provision one and this lint must not reject it.
+ *
+ * If `user` ever gains per-context ownership the way entities have it, revisit this: it encodes an
+ * authorization property of the platform, not a syntax rule.
+ */
+function lintIdentitySurfaces(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as { schemas?: Array<{ typeName?: string; allowedSurfaces?: string[] }> };
+  if (!Array.isArray(bp.schemas)) return;
+  bp.schemas.forEach((schema, i) => {
+    if (!schema.allowedSurfaces?.includes('user')) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['schemas', i, 'allowedSurfaces'],
+      message:
+        `schema '${schema.typeName}': allowedSurfaces cannot include 'user' — a user-surfaced schema ` +
+        'is account-global and requires a root API key, which no blueprint credential ever holds, so ' +
+        "this would fail at apply with a 403. Model the data as a 'record' scoped to the user, or as " +
+        "an 'entity' schema (which a blueprint CAN provision, in its own app context).",
+    });
+  });
+}
+
+/**
+ * An issuer must target the blueprint's own app context.
+ *
+ * `contextId` on an issuer entry is the ONE place a blueprint can name an app context other than its
+ * own. Schemas, roles, the access profile, the service principal and seed records all land in the
+ * blueprint's `contextId`; an issuer could name any other. That asymmetry is a smuggling channel rather
+ * than a feature: someone reviewing a pack reads that it provisions `casework` and has no reason to
+ * check each issuer entry for a different target, so a pack could attach an identity provider — with
+ * self-signup onto a real role — to an app context the reader never associated with it.
+ *
+ * It matters because a pack may be authored by a third party or generated, and because an issuer is a
+ * trust anchor: whoever controls its `jwksUri` can mint identities the platform will accept.
+ *
+ * Requiring equality costs nothing real. One IdP account serving several app contexts still registers
+ * one issuer per context — the `(issuer, audience)` pair must be unique, so each context needs its own
+ * audience and therefore its own entry, which belongs in that context's own blueprint.
+ */
+function lintIssuerContext(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as { contextId?: string; issuers?: Array<{ issuerId?: string; contextId?: string }> };
+  if (!Array.isArray(bp.issuers)) return;
+  bp.issuers.forEach((issuer, i) => {
+    // `contextId === undefined` is defensive, not a tolerated shape: the field is required, and a
+    // missing required string aborts the object parse before superRefine runs. Kept so this reads
+    // as a total function if the field ever becomes optional; it is not an escape hatch.
+    if (issuer.contextId === undefined || issuer.contextId === bp.contextId) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['issuers', i, 'contextId'],
+      message:
+        `issuer '${issuer.issuerId}' targets app context '${issuer.contextId}', but this blueprint ` +
+        `provisions '${bp.contextId}'. An issuer must target the blueprint's own context — everything ` +
+        `else a blueprint creates does, and an issuer that points elsewhere attaches an identity ` +
+        `provider to an app context the blueprint never mentions. Set it to '${bp.contextId}', or move ` +
+        `this issuer into a blueprint for '${issuer.contextId}'.`,
+    });
+  });
+}
+
+/**
  * Which loader-phase a top-level blueprint field's resources are applied in
- * (`@vectros-ai/cli`'s `runLoader`, TWO-TOKEN flow):
- *   - `'bootstrap'` — applied under the narrow, owner-only bootstrap credential
- *     (`provisioning:c`), before the per-context re-mint. Tenant-wide
+ * (`@vectros-ai/cli`'s `runLoader`):
+ *   - `'bootstrap'` — applied under a narrow, owner-only bootstrap credential
+ *     (`provisioning:c`), before the per-context wildcard re-mint. Tenant-wide
  *     provisioning config, the same category as the app-context create itself.
- *   - `'in-context'` — applied under the per-context token re-minted AFTER the
- *     bootstrap phase. Ordinary data-plane provisioning, confined to the
- *     blueprint's own `contextId`.
+ *     `issuers` specifically applies under a SECOND bootstrap-scoped mint,
+ *     re-pinned to the blueprint's own context (`@vectros-ai/cli` #961) — the
+ *     platform requires that combination (`provisioning:c` AND context
+ *     confinement) for `POST/GET/DELETE /v1/auth/issuers`, which neither the
+ *     first (default-pinned) bootstrap mint nor the per-context wildcard mint
+ *     alone can satisfy for a non-`default` blueprint. Still the SAME phase as
+ *     `servicePrincipal` from this map's point of view — the re-mint is a CLI
+ *     implementation detail of "the bootstrap phase", not a third phase value.
+ *   - `'in-context'` — applied under the wildcard per-context token re-minted
+ *     AFTER the bootstrap phase. Ordinary data-plane provisioning, confined to
+ *     the blueprint's own `contextId`.
  *
  * SELF-DOCUMENTING PHASE METADATA: which phase a field applies in was, until
  * this map existed, a fact enforced ONLY by `runLoader`'s hardcoded imperative
@@ -986,20 +1408,23 @@ function lintSeedSurfaces(value: unknown, ctx: z.RefinementCtx): void {
  * `loader.ts`. `vectros blueprint plan` also derives its `[<phase>-phase]`
  * preview annotation from this map.
  *
- * Deliberately covers only the fields the TWO-TOKEN split actually applies to.
- * `identities` is NOT here: declared identities are ensured by a separate,
- * EARLIER pass (the CLI's `resolveApplyTimeIdentities`, before `runLoader` ever
- * runs — see `assertNoUnresolvedIdentities`), not by either loader phase, so
- * shoehorning it into this two-value enum would misdescribe it rather than
- * document it. `name`/`version`/`description`/`contextId`/`contextName` are the
- * blueprint's own scalar identity, not a nested resource block — no phase
- * applies to them individually.
+ * Deliberately covers only the fields the bootstrap/in-context split actually
+ * applies to. `identities` is NOT here: declared identities are ensured by a
+ * separate, EARLIER pass (the CLI's `resolveApplyTimeIdentities`, before
+ * `runLoader` ever runs — see `assertNoUnresolvedIdentities`), not by either
+ * loader phase, so shoehorning it into this two-value enum would misdescribe
+ * it rather than document it. `name`/`version`/`description`/`contextId`/
+ * `contextName` are the blueprint's own scalar identity, not a nested resource
+ * block — no phase applies to them individually.
  */
 export type LoaderPhase = 'bootstrap' | 'in-context';
 
 export const BLUEPRINT_FIELD_PHASES: Readonly<Record<string, LoaderPhase>> = Object.freeze({
   servicePrincipal: 'bootstrap',
   issuers: 'bootstrap',
+  // Registration requires the platform's provisioning:c capability, which
+  // only the bootstrap credential carries — same reasoning as issuers.
+  namespaces: 'bootstrap',
   schemas: 'in-context',
   accessProfile: 'in-context',
   roles: 'in-context',
@@ -1034,6 +1459,15 @@ export const BlueprintSchema = z
      * {@link BlueprintIssuerSchema}).
      */
     issuers: z.array(BlueprintIssuerSchema).optional(),
+    /**
+     * Optional namespaces to register before anything else needs them — see
+     * {@link BlueprintNamespaceSchema}. Applied in the BOOTSTRAP-token phase,
+     * alongside app-context/service-principal creation and issuers, BEFORE
+     * schemas/seed (an `entityBacked` namespace's entities, and an
+     * `allowedSurfaces: ['entity']` schema, both need the registration to
+     * already exist). `org`/`client` need no entry — they exist already.
+     */
+    namespaces: z.array(BlueprintNamespaceSchema).optional(),
   })
   .strict()
   .superRefine((bp, ctx) => {
@@ -1043,6 +1477,9 @@ export const BlueprintSchema = z
     lintNamespacedScopeArrays(bp, ctx);
     lintDataScopeKeys(bp, ctx);
     lintSeedSurfaces(bp, ctx);
+    lintIdentitySurfaces(bp, ctx);
+    lintIssuerContext(bp, ctx);
+    lintNamespaces(bp, ctx);
   });
 
 export type Blueprint = z.infer<typeof BlueprintSchema>;
@@ -1061,6 +1498,8 @@ export type BlueprintRenderHints = z.infer<typeof RenderHintsSchema>;
 export type BlueprintLookupField = z.infer<typeof BlueprintLookupFieldSchema>;
 /** A single trusted-issuer entry, applied in the loader's bootstrap-token phase. */
 export type BlueprintIssuer = z.infer<typeof BlueprintIssuerSchema>;
+/** A single namespace-registration entry, applied in the loader's bootstrap-token phase. */
+export type BlueprintNamespace = z.infer<typeof BlueprintNamespaceSchema>;
 export type BlueprintRoleClause = z.infer<typeof BlueprintRoleClauseSchema>;
 export type BlueprintRoles = z.infer<typeof BlueprintRolesSchema>;
 export type IdentityDecl = z.infer<typeof IdentityDeclSchema>;

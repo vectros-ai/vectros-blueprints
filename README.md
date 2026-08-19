@@ -42,7 +42,7 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   `MCP — <name>` when the blueprint omits `contextName`.
 - `BUNDLED_BLUEPRINTS` / `BLUEPRINT_NAMES` / `getBlueprint(name)` — the
   curated library: `task-management` (the minimal authoring exemplar),
-  `coding-agent-memory`, `agentic-sdlc` (a whole-SDLC system of
+  `agentic-sdlc` (a whole-SDLC system of
   record for an AI dev team: eleven schemas — nine curated (split by content vs
   structure) — ADRs, designs, references, runbooks, and post-mortems as
   **documents**; controls, conventions, gotchas, and a glossary as **records** —
@@ -158,6 +158,17 @@ ships an `editor` role for this — join your own user to the context so you can
 browse and curate the knowledge base in the app. Role clauses pass the same
 data-plane scope gate as `accessProfile`.
 
+Both `accessProfile` and each role clause may also carry an optional
+**`capabilities`** — a list of platform capability names (distinct from the
+schema-level `capabilities` above), e.g. `capabilities: ['member-lifecycle']`.
+This package validates the SHAPE only (non-blank, no duplicates, lowercase
+kebab-case, no `'*'`) — it deliberately does not know which names are actually
+grantable, since that set is a platform property. **This field parses and
+validates; it does not, by itself, cause anything to be granted.** Whether it
+has any effect depends entirely on whether the tool applying your blueprint
+(e.g. `@vectros-ai/cli`) reads and forwards it — check that tool's own release
+notes before relying on it.
+
 A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
 audience, contextId, subClaim?, emailClaim? }`. Unlike `schemas`/`accessProfile`/
@@ -168,11 +179,104 @@ authority, not an ordinary context-scoped one. `(issuer, audience)` must be
 globally unique across the tenant — use a distinct `audience` per environment/
 context sharing one IdP account.
 
+Each entry's **`contextId` must equal the blueprint's own `contextId`**. An issuer
+is a trust anchor — whoever controls its `jwksUri` can mint identities your tenant
+accepts — so a blueprint may only attach one to the context it actually provisions.
+One IdP account serving several contexts therefore needs one entry per context,
+each in that context's own blueprint; that is no extra work, since the
+`(issuer, audience)` uniqueness rule already forces a separate entry per context.
+
+A blueprint may also declare top-level **`namespaces`** — entity-namespace
+registrations, each `{ namespace, specificityRank, entityBacked?, membershipRecordType?,
+membershipTargetField?, membershipLevelField?, membershipLevels? }`. Like `issuers`,
+these are applied in the loader's **bootstrap-token phase**, alongside app-context/
+service-principal creation. Every declared namespace is **always owned by the
+blueprint's own `contextId`** — there is no tenant-wide option, since the platform
+confines namespace registration to the credential's own context unconditionally,
+even for a tenant-wide request.
+
+- `namespace` — 2-32 chars, a lowercase letter first, then lowercase letters/digits/
+  `_`/`-`. A closed set of words is rejected as reserved (`user`, `record`, `document`,
+  `entity`, `self`, `tenant`, `context`, `scope`, `versions`, `lookup`) — `org`/`client`
+  are NOT in that set: they're reserved namespace names, not built-ins, registered the
+  same way as any other. They already exist tenant-wide in every account at
+  `specificityRank` 1000/2000 (below); a context-owned registration needs a different
+  rank, and shadows the tenant-wide one for this context's own callers.
+- `specificityRank` — an integer `0..1_000_000`, this namespace's position in the
+  account's specificity order (breaks ties when a caller holds two scope dimensions
+  at once). Must be unique among this blueprint's own namespaces; the platform is the
+  only party that can see the rest of the account's registrations (including `org`=
+  1000 and `client`=2000), so a collision with those or another blueprint's namespace
+  still surfaces at apply, same as any other non-idempotent-registration collision.
+- `entityBacked` (optional) — when `true`, every value in this namespace must resolve
+  to an existing identity entity; when `false`/omitted, values are free-form strings
+  validated by grammar only.
+- `membershipRecordType` + `membershipTargetField` — optional, declared together
+  (or both omitted): which record type + field hold grants of this namespace's
+  values. `membershipRecordType` must name a `typeName` **this same blueprint**
+  declares under `schemas:` — membership can only resolve over a record type the
+  blueprint itself ships, never one that merely already exists in the target
+  context. Declaring this grants nobody anything on its own; a role opts in
+  explicitly with `${{ member.scope.<namespace> }}` in its `dataScope`.
+- `membershipLevelField` + `membershipLevels` — optional, declared together: the
+  field naming a grant's level (so the same user can hold different levels in
+  different values of this namespace) and the complete set of level labels allowed.
+
+Registration is **not idempotent server-side**: a re-apply whose declaration matches
+what's already registered converges silently, but one that disagrees with the live
+registration fails the apply rather than silently overwriting it.
+
+A blueprint may also declare a top-level **`identities`** — a map of local name →
+principal declaration, each `{ kind, externalId, displayName?, metadata? }`. It
+names principals the blueprint expects to exist so other fields can *reference*
+them, without the blueprint creating a person-specific credential itself:
+
+- `kind` — `user` (the fixed principal surface) or an entity namespace (`org`,
+  `client`, or one you registered) — the same value set `vectros identity create
+  --type` accepts.
+- `externalId` — your stable id for the principal. Resolution is idempotent by
+  this value (ensure-exist), the same posture as `servicePrincipal`.
+- `displayName` (optional) — an entity's `name`; for a `user` (which has no
+  first-class `name` field) it's folded into `payload.displayName` instead.
+- `metadata` (optional) — a JSON object merged into the principal's `payload`.
+
+Reference a declared identity anywhere a principal id is valid — a schema's
+`userId`/`scopes`, an `accessProfile`/role `dataScope` or `identityOverrides`,
+seed-record ownership — with a **`${{ identities.<name> }}`** token. For example,
+an `identityOverrides` entry that stamps every record the service key writes as
+owned by a declared `team` identity:
+
+```
+identityOverrides: { "scope:org": "${{ identities.team }}" }
+```
+
+Resolution is its own creds-bearing pass, **earlier than either loader phase**
+(the reason `identities` is deliberately absent from `BLUEPRINT_FIELD_PHASES`
+below): every *declared* identity is ensured to exist — tenant-wide, under the
+bootstrap credential, the same category as `servicePrincipal` — whether or not
+anything in the blueprint actually references it, and every `${{
+identities.<name> }}` token is then substituted with the resolved principal's
+bare (unprefixed) id before the bootstrap/in-context phases ever run. A `user`
+identity defaults to `HUMAN` (the blueprint's own `servicePrincipal` is the
+separate SERVICE credential).
+
+Two things are caught **offline**, at `validate`/`plan`, rather than surfacing
+only as a live apply failure: a `${{ identities.<name> }}` token that names an
+identity NOT declared in the `identities` block is a parse-time error, and only
+the **whole identity id** can be referenced — a dotted property access like
+`${{ identities.team.externalId }}` is rejected, since the resolver only ever
+has a bare id to substitute, never the declaration's other fields. A declared
+name is separately constrained to letters/digits/underscore, not starting with a
+digit (`demoOrg`, not `demo-org`) — the same grammar a `${{ identities.<name> }}`
+token itself can match. A name outside it is rejected as a parse error at
+declare time (`validate`/`plan`), not silently accepted as unreferenceable.
+
 Which top-level fields apply in which loader phase isn't something you have to
 infer or remember: `BLUEPRINT_FIELD_PHASES` (exported alongside `Blueprint`) is a
 `{ fieldName: 'bootstrap' | 'in-context' }` map you can inspect directly —
 `@vectros-ai/cli`'s own `vectros blueprint plan` preview derives its
 `[<phase>-token phase]` annotations from this same map, so the two can't drift.
+`identities` isn't in it, for the reason given above.
 
 All of the above are **optional and backward-compatible** — a blueprint that
 omits them parses and provisions exactly as before.
@@ -221,8 +325,9 @@ link to another record. The blueprint format carries these extra authoring keys:
 Write-time existence of the target **is** enforced by default — a referencing record can
 only be written once its target exists (so seed the target first). There is no
 reverse-reference index on this surface; to query "which records reference X", add the
-reference field to `lookupFields` as an equality lookup. The bundled `coding-agent-memory`
-blueprint is the exemplar (a `convention` links to the `decision` that established it).
+reference field to `lookupFields` as an equality lookup. The bundled `agentic-sdlc`
+blueprint is the exemplar (a `decision`'s `supersedes` field links to the `decision` it
+replaces).
 
 ## Testing a blueprint
 

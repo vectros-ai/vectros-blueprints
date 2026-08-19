@@ -3,6 +3,124 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.13.0
+
+### Changed
+
+- **The bundled blueprints (`task-management`, `second-brain`, `clinical-intake`,
+  `agentic-sdlc`) now declare `dataScope: {}` explicitly wherever they intend
+  tenant-wide/shared reach**, rather than omitting `dataScope` and relying on
+  that meaning the same thing implicitly. No behavior change — an omitted key
+  and an explicit empty object are equally unconstrained — but `@vectros-ai/cli`
+  ≥ this release lints an *omitted* `dataScope` on an owner-scoped read/write
+  action as a likely authoring mistake (unconstrained reach across every
+  owner), and these bundled examples now model the deliberate spelling rather
+  than tripping that nudge on their own intentionally-shared design.
+
+- **`blueprint validate` now rejects a schema whose `allowedSurfaces` includes
+  `user`, at author time.** Previously such a schema validated clean and
+  `blueprint plan` previewed it as provisionable, while the apply failed with a
+  `403` every time — so the only way to discover the problem was to run it
+  against a live account.
+
+  A user is account-global: the same person across every one of your app
+  contexts. Its schema therefore has no single app context that could own it,
+  lives account-wide, and can only be written with a root API key — which a
+  blueprint never applies with. Model the data as a `record` scoped to the
+  user, or as an `entity` schema.
+
+  **`entity`-surfaced schemas are unaffected and remain valid.** An entity
+  schema is owned by the app context that creates it — the same context a
+  blueprint applies into — so a blueprint can provision one. If you have been
+  avoiding `allowedSurfaces: ['entity']` because it used to fail at apply, it
+  now works; that platform change ships alongside this release.
+
+### Added
+
+- **A blueprint may now declare top-level `namespaces[]`** — entity-namespace
+  registrations (`namespace`, `specificityRank`, optional `entityBacked` and
+  membership fields) applied via `@vectros-ai/cli`'s bootstrap-token phase,
+  alongside `issuers`. Every declared namespace is **always owned by the
+  blueprint's own `contextId`** — there is no tenant-wide option, since the
+  platform confines namespace registration to the credential's own context
+  unconditionally (the same shape `issuers` already has). Validated
+  structurally: grammar, the reserved-namespace set, duplicate names/ranks,
+  and membership-field co-occurrence rules. `org`/`client` are reserved
+  namespace names, not built-ins — registered the same way as any other.
+  They already exist tenant-wide in every account at `specificityRank`
+  1000/2000; a context-owned registration needs a different rank, and
+  shadows the tenant-wide one for this context's own callers.
+
+  A role clause or the `accessProfile`'s `dataScope` may reference
+  `${{ member.scope.<namespace> }}` (or `${{ member.scope.<namespace>:<level> }}`
+  to select one declared membership level) to scope reach to the caller's own
+  membership in a registered namespace, resolved by the platform per request.
+
+- **Role clauses and `accessProfile` may now declare `capabilities` (format
+  support only — read this before relying on it).** A role clause and the
+  bootstrap `accessProfile` both gain an optional `capabilities: string[]` —
+  format passthrough to the platform's `granted_capabilities` clause
+  dimension, alongside the existing `allowedActions`/`dataScope`.
+
+  Validated structurally only: non-blank, no duplicates, and the platform's
+  public capability-name grammar (lowercase letters, digits and hyphens,
+  starting with a letter, no colon, never `'*'`). This package does not know
+  — and deliberately does not hard-code — which names are actually grantable
+  today.
+
+  **⚠️ This package parses and validates the field; it does not, by itself,
+  cause anything to be granted.** Whether `capabilities` has any effect
+  depends entirely on whether the client consuming this package (e.g.
+  `@vectros-ai/cli`) reads the field and forwards it to the platform — check
+  your client's own release notes. A client that does not yet support
+  `capabilities` will silently ignore it, with no error at any layer. Fully
+  backward-compatible either way: a blueprint that omits `capabilities`
+  parses and provisions exactly as before.
+
+### Changed (breaking)
+
+- **An `issuers[]` entry must now target the blueprint's own `contextId`.** Validation rejects a
+  blueprint whose issuer names a different app context, pointing at the offending entry and naming
+  both contexts.
+
+  `issuers[].contextId` was the only field able to name an app context other than the blueprint's
+  own — schemas, roles, the access profile, the service principal and seed records all land in
+  `contextId`. That asymmetry was a review blind spot rather than a feature: someone reading a pack
+  sees which context it provisions and has no reason to check each issuer entry for a different
+  target, so a blueprint could attach an identity provider — with self-signup onto a real role — to
+  an app context it never otherwise mentions. An issuer is a trust anchor: whoever controls its
+  `jwksUri` can mint identities the platform will accept. That is worth being certain about when a
+  blueprint comes from somewhere else.
+
+  This costs nothing real. One IdP account serving several app contexts already needs one issuer
+  registration per context, because the `(issuer, audience)` pair must be unique — so each context
+  needs its own audience and therefore its own entry, which belongs in that context's blueprint.
+
+  **If a blueprint of yours does this today, move the entry into a blueprint for the context it
+  targets, or set its `contextId` to the blueprint's own.**
+
+  **⚠️ Requires a recent `@vectros-ai/cli` to apply.** The platform enforces a related but
+  *different* rule: an issuer may only be registered for the app context that the **calling
+  credential** is bound to. The API never sees your blueprint, so the two rules only agree when the
+  credential applying it is bound to the blueprint's own context. Older CLI versions apply `issuers`
+  under a bootstrap credential bound to `default`, so registering an issuer for any other context
+  is refused with `403` — including a blueprint that satisfies the validation rule above. Upgrade
+  the CLI before adopting `issuers` on a non-`default` context; `vectros --version` reports yours.
+
+### Removed
+
+- **The `coding-agent-memory` blueprint.** It never had a real adopter — no production
+  provisioning, no test traffic beyond the bundled-library suite exercising it structurally like
+  every other entry — and was never pressure-tested against a live tenant the way the other bundled
+  blueprints have been. Removed before a wider release makes withdrawing an unvalidated blueprint a
+  breaking change for someone who actually depends on it, rather than a clean deletion now.
+
+  If you were using it: the schemas it provisioned (`decision`, `convention`, `gotcha`) are a subset
+  of what `agentic-sdlc` provisions today, cross-linked into that blueprint's larger knowledge-graph
+  model — `vectros bootstrap --blueprint agentic-sdlc` is the closest bundled equivalent. The
+  removed source is still recoverable from this package's git history if you need to fork it
+  standalone.
+
 ## 0.12.0
 
 ### Added
@@ -133,6 +251,18 @@ This project adheres to [Semantic Versioning](https://semver.org).
   confines these tokens to a role clause's `dataScope`) is updated in
   lockstep — a misplaced multi-segment token (e.g. in a seed record field)
   is still caught, the same as the flat form always was.
+
+- **`${{ member.scope.<ns> }}` (and its `:<level>` selector form) — the R39
+  namespace-membership runtime placeholder — is now supported, matching
+  `self`/`under`.** It had no resolver entry at all: the install-time
+  resolver rejected it outright as a malformed reference before it could
+  ever reach the platform, and the placement lint that confines `self`/
+  `under` to a role clause's `dataScope` did not recognize it either, so a
+  misplaced or typo'd one gave no local warning. Both are fixed together —
+  `${{ member.scope.<ns>[:<level>] }}` now resolves (is left literal for
+  server-side resolution by `NamespaceMembershipResolver`) at any depth
+  including the leveled selector, and is confined to a role clause's
+  `dataScope` by the same lint as `self`/`under`.
 
 ## 0.11.0
 

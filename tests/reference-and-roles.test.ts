@@ -227,3 +227,56 @@ test('self: REJECTS ${{ under.self.userId }} in accessProfile.dataScope', () => 
     `expected an accessProfile.dataScope issue, got ${JSON.stringify(paths)}`,
   );
 });
+
+// #936 R39 / PM cold-pass finding (2026-08-18) — `${{ member.scope.<ns> }}` is the membership
+// equivalent of `${{ self.* }}` (a runtime placeholder NamespaceMembershipResolver resolves
+// server-side, per request) and must get the identical placement lint: valid ONLY inside a role
+// clause's dataScope, flagged everywhere else. Before this, `member.*` had no lint entry at all —
+// a misplaced/typo'd one landed as a dead, unresolved literal with zero local warning.
+
+test('member: ACCEPTS ${{ member.scope.team }} inside a role clause dataScope', () => {
+  const bp = parseBlueprint(
+    minimal({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:r:case'], dataScope: { 'scope:team': ['${{ member.scope.team }}'] } }],
+      },
+    } as Partial<Blueprint>),
+  );
+  assert.equal(bp.roles?.hr_admin[0].dataScope?.['scope:team'][0], '${{ member.scope.team }}');
+});
+
+test('member: ACCEPTS the leveled selector ${{ member.scope.team:lead }} inside a role clause dataScope', () => {
+  const bp = parseBlueprint(
+    minimal({
+      roles: {
+        hr_admin: [
+          { allowedActions: ['records:r:case'], dataScope: { 'scope:team': ['${{ member.scope.team:lead }}'] } },
+        ],
+      },
+    } as Partial<Blueprint>),
+  );
+  assert.equal(bp.roles?.hr_admin[0].dataScope?.['scope:team'][0], '${{ member.scope.team:lead }}');
+});
+
+test('member: REJECTS ${{ member.scope.team }} in accessProfile.dataScope', () => {
+  const paths = issuePaths(
+    minimal({
+      accessProfile: { allowedActions: ['records:r'], dataScope: { 'scope:team': ['${{ member.scope.team }}'] } },
+    }),
+  );
+  assert.ok(
+    paths.some((p) => p.startsWith('accessProfile.dataScope')),
+    `expected an accessProfile.dataScope issue, got ${JSON.stringify(paths)}`,
+  );
+});
+
+test('member: REJECTS ${{ member.scope.team }} in a seed record field', () => {
+  const paths = issuePaths(
+    minimal({
+      seed: [
+        { surface: 'record', typeName: 'task', externalId: 'seed-1', fields: { owner: '${{ member.scope.team }}' } },
+      ],
+    }),
+  );
+  assert.ok(paths.some((p) => p.startsWith('seed')), `expected a seed issue, got ${JSON.stringify(paths)}`);
+});

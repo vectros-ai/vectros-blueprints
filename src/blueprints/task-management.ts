@@ -121,8 +121,10 @@ const taskManagement: Blueprint = {
   // r/c/u + search + schema discovery. NOT records:d (least privilege).
   accessProfile: {
     allowedActions: ['records:r', 'records:c', 'records:u', 'search:r', 'schemas:r'],
-    // dataScope omitted → tenant-level shared tracker. Add a `scope:org`
-    // entry for per-org isolation.
+    // dataScope: {} (present, empty) is the deliberate marker for a
+    // tenant-level shared tracker — every task visible to every holder of
+    // this credential. Add a `scope:org` entry instead for per-org isolation.
+    dataScope: {},
   },
 
   servicePrincipal: {

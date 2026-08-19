@@ -1229,6 +1229,10 @@ const agenticSdlc: Blueprint = {
   // DATA_PLANE_ACTIONS above for the action set + rationale.
   accessProfile: {
     allowedActions: DATA_PLANE_ACTIONS,
+    // dataScope: {} (present, empty) is the deliberate marker for tenant-wide
+    // reach — this service key IS the runtime's own access to the whole KB,
+    // not a multi-owner resource to isolate.
+    dataScope: {},
   },
 
   // A reusable `editor` role for the HUMAN owner — DISTINCT from `accessProfile`
@@ -1249,7 +1253,9 @@ const agenticSdlc: Blueprint = {
     // which includes members' private memory — the trusted-administrator tradeoff,
     // called out in the bundled guide. Scope it down if your deployment wants
     // curator access without private-memory visibility.
-    editor: [{ allowedActions: EDITOR_ACTIONS }],
+    // dataScope: {} echoes the "deliberately UNSCOPED (whole-context)" call-out
+    // above as an explicit marker, not just prose — see it for the tradeoff.
+    editor: [{ allowedActions: EDITOR_ACTIONS, dataScope: {} }],
     // A team member (or their agent) — TWO memory tiers as two UNIONed clauses
     // (a record is accessible when ANY clause grants it; within one clause every
     // dataScope dimension must match):
@@ -1269,7 +1275,9 @@ const agenticSdlc: Blueprint = {
     // `vectros join agentic-sdlc --role member`; verify a binding with
     // `vectros access explain --principal me --context agentic-sdlc`.
     member: [
-      { allowedActions: MEMBER_SHARED_READ_ACTIONS },
+      // dataScope: {} echoes clause 1's own "UNSCOPED, but safe" call-out above
+      // as an explicit marker, not just prose.
+      { allowedActions: MEMBER_SHARED_READ_ACTIONS, dataScope: {} },
       {
         // `inference:r` is IN this self-scoped clause (not only clause 1) so a
         // member's `rag_ask` can ground on its OWN private memory — the read

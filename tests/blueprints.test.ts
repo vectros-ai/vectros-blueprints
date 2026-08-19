@@ -74,9 +74,8 @@ test('contextNameOf prefers explicit contextName, else derives from name', () =>
 });
 
 test('bundled registry includes the curated library + getBlueprint works', () => {
-  assert.ok(BUNDLED_BLUEPRINTS.length >= 5);
+  assert.ok(BUNDLED_BLUEPRINTS.length >= 4);
   assert.ok(BLUEPRINT_NAMES.includes('task-management'));
-  assert.ok(BLUEPRINT_NAMES.includes('coding-agent-memory'));
   assert.ok(BLUEPRINT_NAMES.includes('agentic-sdlc'));
   assert.ok(BLUEPRINT_NAMES.includes('second-brain'));
   assert.ok(BLUEPRINT_NAMES.includes('clinical-intake'));
@@ -197,22 +196,21 @@ test('SHOWCASE: bundled date fields are range-queryable and re-model nothing tha
   assert.ok(rangeFields.length >= 4, `expected the range showcase across blueprints, saw ${rangeFields.join(', ')}`);
 });
 
-test('SHOWCASE: coding-agent-memory links a convention to its decision via a typed reference', () => {
-  const cam = getBlueprint('coding-agent-memory')!;
-  const convention = cam.schemas.find((s) => s.typeName === 'convention')!;
-  const ref = convention.fields.find((f) => f.fieldId === 'establishedByDecision');
+test('SHOWCASE: agentic-sdlc links a convention to its decision via a typed, cross-surface reference', () => {
+  const sdlc = getBlueprint('agentic-sdlc')!;
+  const convention = sdlc.schemas.find((s) => s.typeName === 'convention')!;
+  const ref = convention.fields.find((f) => f.fieldId === 'establishedBy');
   assert.equal(ref?.fieldType, 'reference');
   assert.equal(ref?.targetTypeName, 'decision');
-  assert.equal(ref?.targetSurface, 'record'); // platform requires it; would 400 without
+  assert.equal(ref?.targetSurface, 'document'); // record → document: the cross-surface edge
   // declared as an equality lookup so "conventions established by decision X" enumerates
   const isLookup = (convention.lookupFields ?? []).some(
-    (lf) => (typeof lf === 'string' ? lf : lf.fieldName) === 'establishedByDecision',
+    (lf) => (typeof lf === 'string' ? lf : lf.fieldName) === 'establishedBy',
   );
-  assert.ok(isLookup, 'establishedByDecision is an equality lookup');
-  // A seeded convention resolves the link at bootstrap (decision seeded first; the
-  // loader sends externalId top-level so the target's first-class externalId resolves).
-  const seed = (cam.seed ?? []).find((r) => r.typeName === 'convention');
-  assert.equal(seed?.fields?.establishedByDecision, 'seed-use-vectros-for-memory');
+  assert.ok(isLookup, 'establishedBy is an equality lookup');
+  // (no seed-resolution sub-case here — agentic-sdlc ships with no seed data, unlike the
+  // blueprint this test previously showcased; the schema-shape assertions above are the
+  // durable coverage that matters.)
 });
 
 test('GUARD: no bundled schema declares a reserved identifier as a lookup field', () => {
@@ -546,10 +544,11 @@ test('agentic-sdlc: editor role = service-key data plane PLUS hard delete (the h
   for (const del of ['records:d', 'documents:d', 'folders:d']) {
     assert.ok(editorActions.includes(del), `editor role must grant ${del}`);
   }
-  // No dataScope: the owner sees + deletes across the whole context (not an ownership slice).
-  // A per-user ownership-restricted delete is a separate concern (needs an identity on the
-  // credential) and is intentionally NOT modeled here.
-  assert.equal(editor![0].dataScope, undefined, 'editor role is unscoped (whole-context access)');
+  // No dataScope dimensions: the owner sees + deletes across the whole context (not an
+  // ownership slice). A per-user ownership-restricted delete is a separate concern (needs
+  // an identity on the credential) and is intentionally NOT modeled here. `dataScope: {}`
+  // (present, empty) is the explicit marker for this and is equally "unscoped" to `undefined`.
+  assert.deepEqual(editor![0].dataScope ?? {}, {}, 'editor role is unscoped (whole-context access)');
   // Still data-plane only: no control-plane action leaks in via the role.
   assert.ok(
     !editorActions.some((a) => a.startsWith('provisioning') || a.startsWith('app-contexts') || a.includes('users:') || a.includes('orgs:') || a.includes('clients:') || a.includes('keys:') || a.includes('profiles:') || a.includes('billing') || a.includes('admin')),
@@ -568,7 +567,9 @@ test('agentic-sdlc: the `member` role composes two memory tiers (shared KB + pri
   // gated by the clause's typed record grants — so recall admits only the
   // curated types + documents, never any principal's private memory.
   const shared = member![0];
-  assert.equal(shared.dataScope, undefined, 'shared-KB clause is UNSCOPED (recall bounded by per-type grants, not by org)');
+  // `dataScope: {}` (present, empty) is the explicit marker for this and is
+  // equally "unscoped" to `undefined`.
+  assert.deepEqual(shared.dataScope ?? {}, {}, 'shared-KB clause is UNSCOPED (recall bounded by per-type grants, not by org)');
   for (const a of shared.allowedActions) {
     assert.ok(a !== 'records:r', 'shared-read must be TYPE-SCOPED, never blanket records:r');
     assert.ok(!/^records:[a-z]+:memory$/.test(a), `shared clause must not touch the memory type (${a})`);

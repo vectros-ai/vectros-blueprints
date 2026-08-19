@@ -533,6 +533,41 @@ test('under.*: an N-segment token embedded mid-string is re-emitted verbatim (in
   assert.equal(r.description, 'founder=${{ under.self.userId }} ok');
 });
 
+// #936 R39 / PM cold-pass finding (2026-08-18) — before `member` joined DEFERRED_NAMESPACES,
+// `${{ member.scope.<ns> }}` had NO deferred entry: it fails the flat two-segment
+// WHOLE_TOKEN_RE/INNER_REF_RE shape every non-deferred namespace is checked against, so it would
+// have failed install-time resolution outright as a "malformed reference" rather than surviving to
+// reach the server. This is the member.* mirror of the self.*/under.* tests just above.
+
+test('member.*: a whole-value ${{ member.scope.team }} token is left literal', () => {
+  const r = resolved(
+    doc({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:r'], dataScope: { 'scope:team': ['${{ member.scope.team }}'] } }],
+      },
+    }),
+  );
+  assert.equal(r.roles.hr_admin[0].dataScope['scope:team'][0], '${{ member.scope.team }}');
+});
+
+test('member.*: the leveled selector ${{ member.scope.team:lead }} token is left literal', () => {
+  const r = resolved(
+    doc({
+      roles: {
+        hr_admin: [
+          { allowedActions: ['records:r'], dataScope: { 'scope:team': ['${{ member.scope.team:lead }}'] } },
+        ],
+      },
+    }),
+  );
+  assert.equal(r.roles.hr_admin[0].dataScope['scope:team'][0], '${{ member.scope.team:lead }}');
+});
+
+test('member.*: an N-segment token embedded mid-string is re-emitted verbatim (interpolate path)', () => {
+  const r = resolved(doc({ description: 'team=${{ member.scope.team }} ok' }));
+  assert.equal(r.description, 'team=${{ member.scope.team }} ok');
+});
+
 test('a namespace that is a textual PREFIX of a deferred one, but not equal, still errors', () => {
   // "selfish" starts with "self" but is not the "self" namespace — must not false-positive
   // against the deferred-namespace match.

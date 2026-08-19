@@ -129,8 +129,17 @@ const INNER_REF_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
  * resolution form) is a real, platform-verified runtime reference form, resolved
  * server-side at credential-mint time — this install-time resolver must leave it
  * untouched exactly like `self`/`identities`.
+ *
+ * `member` joins the set for the same reason (#936 R39): `${{ member.scope.<ns> }}`
+ * (and its `:<level>` selector form) is a runtime per-membership placeholder,
+ * resolved server-side per request by `NamespaceMembershipResolver` — never at
+ * install time. PM cold-pass finding (2026-08-18): before this, `member.*` had no
+ * deferred entry, so a role's `dataScope` value using it would fail install-time
+ * resolution outright (it fails the flat two-segment `INNER_REF_RE`/`WHOLE_TOKEN_RE`
+ * shape and every non-deferred namespace is checked against exactly that), not just
+ * escape the placement lint below.
  */
-const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under']);
+const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under', 'member']);
 
 /**
  * Deferred references are NOT limited to a flat `namespace.name` shape — the runtime
@@ -149,9 +158,18 @@ const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under']);
  * a deeper token like `self.scope.org` simply fails that strict 2-segment match and
  * falls through to `interpolate`, where this pattern catches it. No separate
  * whole-string variant needed.
+ *
+ * An optional trailing `:label` on the LAST segment covers `member`'s leveled selector,
+ * {@code ${{ member.scope.<ns>:<level> }}} (`TokenScope.MEMBER_PLACEHOLDER`'s grammar) — `self`/
+ * `under` never use a colon suffix, so this is additive for them (their tokens simply never match
+ * it). Without this, the colon breaks the plain `[A-Za-z_]\w*` segment match and the WHOLE colon
+ * form fails install-time resolution outright as a malformed reference, same shape as the missing
+ * `DEFERRED_NAMESPACES` entry this pattern already fixes.
  */
 const DEFERRED_NS_ALTERNATION = [...DEFERRED_NAMESPACES].join('|');
-const DEFERRED_INNER_RE = new RegExp(`^(?:${DEFERRED_NS_ALTERNATION})(?:\\.[A-Za-z_]\\w*)+$`);
+const DEFERRED_INNER_RE = new RegExp(
+  `^(?:${DEFERRED_NS_ALTERNATION})(?:\\.[A-Za-z_]\\w*)+(?::[A-Za-z_]\\w*)?$`,
+);
 
 /** Resolve one `ns.name` reference to its value, or push an issue + return undefined. */
 function resolveRef(ns: string, name: string, ctx: ResolveCtx, path: string): InputScalar | undefined {
