@@ -93,7 +93,7 @@ test('clinical-intake declares sensitive PHI fields (the redaction exemplar)', (
   // The working/searchable fields must NOT be sensitive (else the demo can't search).
   assert.ok(!fields.find((f) => f.fieldId === 'presentingConcern')?.sensitive);
   // No reveal scope on the profile — the demo key cannot un-redact.
-  assert.ok(!bp.accessProfile.allowedActions.some((a) => a.includes(':s')));
+  assert.ok(!bp.accessProfile.allowedActions!.some((a) => a.includes(':s')));
 });
 
 test('bundled blueprint names are unique', () => {
@@ -241,7 +241,7 @@ test('second-brain pins inference:r (the scope behind its documented rag_ask flo
   // only checks data-plane-ness, so without this a regression dropping inference:r would
   // break the documented flow with no failing test.
   const sb = getBlueprint('second-brain')!;
-  assert.ok(sb.accessProfile.allowedActions.includes('inference:r'));
+  assert.ok(sb.accessProfile.allowedActions!.includes('inference:r'));
 });
 
 test('GUARD: every bundled blueprint is structurally valid', () => {
@@ -482,7 +482,7 @@ test('agentic-sdlc: `convention` keeps rule / why / howToApply as separate field
 });
 
 test('agentic-sdlc: pins inference:r + the document/folder scopes its documented flows need', () => {
-  const actions = getBlueprint('agentic-sdlc')!.accessProfile.allowedActions;
+  const actions = getBlueprint('agentic-sdlc')!.accessProfile.allowedActions!;
   // Grounded rag_ask over rationale/lesson bodies.
   assert.ok(actions.includes('inference:r'));
   // The SAME scoped key ingests narrative docs (the `doc` surface + folders).
@@ -537,7 +537,7 @@ test('agentic-sdlc: editor role = service-key data plane PLUS hard delete (the h
   assert.equal(editor!.length, 1, 'the editor role is a single clause');
   const editorActions = editor![0].allowedActions;
   // Superset of the service-key set — a human curator can do everything the agent can.
-  for (const a of bp.accessProfile.allowedActions) {
+  for (const a of bp.accessProfile.allowedActions!) {
     assert.ok(editorActions.includes(a), `editor role must include the service-key action ${a}`);
   }
   // PLUS hard delete across the data plane (the whole point of the human-owner role).
@@ -982,7 +982,7 @@ test('GUARD: no bundled blueprint requests a delete or control-plane scope', () 
   // a control-plane verb would be both a bad example and a scope-gate failure.
   const controlPlane = ['keys', 'profiles', 'app-contexts', 'users', 'billing', 'admin', 'clients', 'orgs'];
   for (const b of BUNDLED_BLUEPRINTS) {
-    for (const action of b.accessProfile.allowedActions) {
+    for (const action of b.accessProfile.allowedActions!) {
       assert.ok(!action.includes(':d'), `${b.name} must not request a delete scope (${action})`);
       const resource = action.split(':')[0];
       assert.ok(

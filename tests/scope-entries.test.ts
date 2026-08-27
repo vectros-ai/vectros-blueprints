@@ -30,7 +30,10 @@ function withSchemaScopes(scopes: unknown[]): unknown {
 
 function withSeedScopes(scopes: unknown[]): unknown {
   return minimal({
-    schemas: [{ typeName: 'task', displayName: 'Task' }],
+    // Missing `fields` deliberately — this schema entry only exists so `seed`
+    // below has a typeName to validate against; `as never` matches this
+    // file's own sibling helper (withSchemaScopes) above.
+    schemas: [{ typeName: 'task', displayName: 'Task' } as never],
     seed: [{ surface: 'record', typeName: 'task', externalId: 's1', fields: {}, scopes } as never],
   });
 }

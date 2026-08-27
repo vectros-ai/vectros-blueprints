@@ -130,7 +130,7 @@ const INNER_REF_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
  * server-side at credential-mint time — this install-time resolver must leave it
  * untouched exactly like `self`/`identities`.
  *
- * `member` joins the set for the same reason (#936 R39): `${{ member.scope.<ns> }}`
+ * `member` joins the set for the same reason: `${{ member.scope.<ns> }}`
  * (and its `:<level>` selector form) is a runtime per-membership placeholder,
  * resolved server-side per request by `NamespaceMembershipResolver` — never at
  * install time. PM cold-pass finding (2026-08-18): before this, `member.*` had no
@@ -140,6 +140,22 @@ const INNER_REF_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
  * escape the placement lint below.
  */
 const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under', 'member']);
+
+/**
+ * Bare (dot-less) runtime sentinels this install-time resolver must ALSO leave
+ * untouched — found live: `${{ any }}` (the platform's "claim this
+ * dimension without enumerating values" `dataScope` sentinel, already
+ * recognized by the CLI's own `lint.ts`) has no `.` at all, so it matches
+ * neither {@link WHOLE_TOKEN_RE}
+ * nor {@link DEFERRED_INNER_RE} (both require a `namespace.name` shape) and
+ * fell through to the generic "malformed reference" error the first time a
+ * blueprint actually authored it in a role's `dataScope` — a create-side
+ * scope key genuinely needs a value-less claim exactly like this, so it is
+ * not a corner case. Same fix shape as the `member` entry above: an
+ * install-time resolver has to know about EVERY runtime placeholder form
+ * it must defer, not just the ones already exercised by an existing test.
+ */
+const DEFERRED_BARE_TOKENS = new Set(['any']);
 
 /**
  * Deferred references are NOT limited to a flat `namespace.name` shape — the runtime
@@ -232,8 +248,8 @@ function interpolate(str: string, ctx: ResolveCtx, path: string): string {
       });
     } else {
       const inner = (m[1] ?? '').trim();
-      if (DEFERRED_INNER_RE.test(inner)) {
-        out += m[0]; // deferred namespace, any depth → re-emit the token verbatim (resolved later)
+      if (DEFERRED_INNER_RE.test(inner) || DEFERRED_BARE_TOKENS.has(inner)) {
+        out += m[0]; // deferred namespace/sentinel → re-emit the token verbatim (resolved later)
         last = TOKEN_SCAN_RE.lastIndex;
         continue;
       }

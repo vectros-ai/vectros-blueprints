@@ -386,7 +386,26 @@ const BlueprintAccessProfileSchema = z
   .object({
     // Validated structurally here; the SCOPE GATE (in @vectros-ai/cli) is
     // what enforces the data-plane-only security boundary.
-    allowedActions: z.array(z.string().min(1)).min(1),
+    //
+    // Optional now: mutually exclusive with `roleIds` below (the
+    // `.superRefine` on this schema enforces the XOR, mirroring the platform's
+    // own `AccessProfileDB.validateScopesXorRole`). Exactly one of the two
+    // authors this profile's grant.
+    allowedActions: z.array(z.string().min(1)).min(1).optional(),
+    // Additive role composition: this profile's effective grant is
+    // each named role's own clauses, concatenated in the order listed, instead of
+    // an inline clause authored here. Every id must name a role this SAME
+    // blueprint declares in `roles` (`lintAccessProfileRoleIds` below — the
+    // authoring-time mirror of the platform's same-`(tenantId, contextId)`
+    // check, trivially satisfied here since a blueprint's own `roles` are
+    // always created in its own `contextId`); duplicates are rejected outright
+    // rather than silently deduplicated. Mutually exclusive
+    // with `allowedActions`/`dataScope`/`capabilities` — a role-referencing
+    // profile has no inline clause of its own to carry a dataScope or
+    // capability grant; author those on the referenced Role instead, where
+    // every profile referencing it picks them up uniformly (mirrors how
+    // `assumable` already works for a `roleId`-referencing profile).
+    roleIds: z.array(z.string().min(1)).min(1).optional(),
     // Optional ownership binding: { userId: [...], "scope:org": [...], "scope:client": [...] }.
     // A `null` element in a value list is the documented NULL SENTINEL — it
     // grants access to TENANT-LEVEL (owner-less) records IN ADDITION to the
@@ -435,7 +454,54 @@ const BlueprintAccessProfileSchema = z
     // than reuse one policy for both.
     capabilities: GrantedCapabilitiesSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((ap, ctx) => {
+    // The XOR: exactly one of an inline clause (allowedActions,
+    // optionally paired with dataScope/capabilities) or a role-composed
+    // reference (roleIds). Mirrors AccessProfileDB.validateScopesXorRole
+    // server-side — caught here, at authoring time, rather than left to 400 at
+    // mint.
+    const hasInline = ap.allowedActions !== undefined;
+    const hasRoleIds = ap.roleIds !== undefined;
+    if (hasInline === hasRoleIds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['roleIds'],
+        message: hasInline
+          ? "accessProfile carries both 'allowedActions' and 'roleIds' — provide exactly one: an " +
+            "inline clause (allowedActions, optionally dataScope/capabilities) OR a role composition " +
+            "(roleIds), never both"
+          : "accessProfile carries neither 'allowedActions' nor 'roleIds' — provide exactly one: an " +
+            "inline clause (allowedActions, optionally dataScope/capabilities) OR a role composition " +
+            "(roleIds)",
+      });
+      return;
+    }
+    // A roleIds-composed profile has no inline clause to hang a dataScope or
+    // capability grant on — the same reason `assumable` is rejected alongside
+    // a `roleId`-referencing profile (AccessProfileRequest's own doc). Author
+    // these on the referenced Role's own clauses instead.
+    if (hasRoleIds) {
+      if (ap.dataScope !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['dataScope'],
+          message:
+            "accessProfile.dataScope is not valid alongside 'roleIds' — a role-composed profile has " +
+            'no inline clause of its own; author dataScope on the referenced role\'s clause instead',
+        });
+      }
+      if (ap.capabilities !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['capabilities'],
+          message:
+            "accessProfile.capabilities is not valid alongside 'roleIds' — a role-composed profile has " +
+            'no inline clause of its own; author capabilities on the referenced role\'s clause instead',
+        });
+      }
+    }
+  });
 
 // A single role clause — mirrors the platform/SDK ScopeClause, now THREE-part:
 // allowedActions + optional per-clause dataScope + optional per-clause
@@ -449,13 +515,48 @@ const BlueprintAccessProfileSchema = z
 // and a top-level lint (BlueprintSchema) confines them to here. Every KEY is
 // also validated (`lintDataScopeKeys`) — `userId` or a grammar-valid
 // `scope:<ns>`, no other shape, same rule as `accessProfile.dataScope` above.
+//
+// `dataScopeRef` is AUTHORING-ONLY sugar: name a
+// top-level `fragments.<name>` entry instead of repeating an identical
+// `dataScope` map verbatim across several clauses (the exact shape
+// `casework.blueprint.yaml`'s `case_handler` role hit — four clauses
+// repeating `scope:org: ['${{ self.scope.org }}']`). Mutually exclusive with
+// `dataScope` on the SAME clause (this schema's own `.superRefine` below) — never
+// both, and expanded to a literal `dataScope` (the ref itself never survives)
+// by {@link expandDataScopeRefs} before `parseBlueprint` returns, so nothing
+// downstream — `@vectros-ai/cli`'s loader, the wire payload it sends to
+// `createRole` — ever sees a `dataScopeRef`. `lintDataScopeRefs` (below)
+// checks the name resolves against a declared `fragments` entry.
 const BlueprintRoleClauseSchema = z
   .object({
     allowedActions: z.array(z.string().min(1)).min(1),
     dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    dataScopeRef: z.string().min(1).optional(),
     capabilities: GrantedCapabilitiesSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((c, ctx) => {
+    if (c.dataScope !== undefined && c.dataScopeRef !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['dataScopeRef'],
+        message:
+          "a clause may declare 'dataScope' OR 'dataScopeRef', not both — dataScopeRef is sugar for " +
+          "an inline dataScope fragment, so the two are alternatives for the same slot, not additive",
+      });
+    }
+  });
+
+// A fragment is exactly a `dataScope` map (same shape,
+// same key/value grammar — `lintDataScopeKeys`/`lintSelfTokenPlacement` below
+// cover it identically to `roles[].dataScope`), named once at the top level
+// and referenced from any clause via `dataScopeRef: <name>`. Purely a local
+// authoring convenience: it is never sent anywhere, never itself a
+// provisioned resource (absent from `BLUEPRINT_FIELD_PHASES`), and does not
+// survive `parseBlueprint` as a live reference — only as expanded literals.
+const BlueprintFragmentsSchema = z.record(
+  z.record(z.array(z.union([z.string().min(1), z.null()]))),
+);
 
 // Optional top-level `roles`: a map of roleId → ordered clauses. Authored in the
 // blueprint and bound to principals via `vectros access grant --role <id>`.
@@ -463,6 +564,31 @@ const BlueprintRoleClauseSchema = z
 // for the blueprint's own service-principal key). Roles are identity-agnostic,
 // reusable, multi-clause rules (architecture §6).
 const BlueprintRolesSchema = z.record(z.array(BlueprintRoleClauseSchema).min(1));
+
+// A role-level `assumable` grant map: the
+// `POST /v1/auth/token/assume` entitlement the platform's role create/update
+// request and response already carry server-side, wired through blueprint
+// authoring here for the first time. Deliberately NARROWER than `dataScope`'s
+// grammar (`lintRoleAssumable` below, mirroring the platform's own
+// authoring-time grammar check for this field): every KEY must be a
+// `scope:<namespace>` — the principal (`userId`) can NEVER be named, unlike
+// `dataScope`, where it is the one non-namespaced key allowed — and no value
+// may be `null` (assumable has no tenant-level/owner-less reading to opt
+// into; `/assume` always requests one concrete value).
+const BlueprintRoleAssumableSchema = z.record(z.array(z.string().min(1)).min(1));
+
+// `roleAssumable` is a SEPARATE top-level map (roleId →
+// grant), not a field folded into a `roles[roleId]` entry. Deliberate: a
+// role's wire shape has always been a bare clause array, and `assumable` is
+// role-LEVEL (a sibling of the clause list on `RoleRequest`, per that DTO's
+// own doc), not a clause field — folding it in would force `roles[roleId]`
+// into a `{ clauses, assumable }` object for every author and every existing
+// TypeScript consumer indexing it directly, a real breaking change for a
+// feature meant to be purely additive (mirrors `dataScopeRef`'s own
+// top-level-map-plus-reference shape, just keyed by roleId instead of a
+// fragment name — `lintRoleAssumable` below is this field's twin of
+// `lintDataScopeRefs`, checking every key names a DECLARED role).
+const BlueprintRoleAssumableMapSchema = z.record(BlueprintRoleAssumableSchema);
 
 // A namespace name: a lowercase letter first, then lowercase letters,
 // digits, `_` or `-`, 2-32 chars — mirrors the platform `IdentityNamespaceDB`
@@ -582,6 +708,14 @@ const BlueprintIssuerSchema = z
     /** The claim carrying the subject's email (first-login invite matching). Platform defaults to 'email' when omitted. */
     emailClaim: z.string().min(1).optional(),
     /**
+     * The IdP's OIDC userinfo endpoint. Optional. Presented tokens are access tokens, which under
+     * OIDC don't carry `email` unless the IdP was specifically configured to add it — if
+     * `emailClaim` misses on the presented token, and `userinfoUri` is configured, Vectros falls
+     * back to calling this endpoint (with the presented token as the bearer credential) and reads
+     * `emailClaim` from its JSON response instead. Omit to leave the fallback disabled.
+     */
+    userinfoUri: z.string().min(1).optional(),
+    /**
      * Opt-in self-service signup: a list of {signupType, roleId} pairs. When a first-time exchange
      * caller presents no invite token but names a signupType matching one of these (or omits it and
      * exactly one entry exists), a brand-new user is created and bound to that entry's role, no
@@ -623,17 +757,29 @@ const BlueprintIssuerSchema = z
  * either needs a different rank, and shadows the tenant-wide one for this
  * context's own callers.
  *
- * **Always registered OWNED by this blueprint's own `contextId`** — there is
- * deliberately no tenant-wide option here, unlike the platform's own
- * `NamespaceRequest` (which supports one via an omitted `contextId`). A
+ * **Registered OWNED by this blueprint's own `contextId` by default** — a
  * blueprint applies under the CLI's bootstrap credential, and the platform's
- * namespace-registration endpoint confines it to its own context
- * unconditionally (even for a tenant-wide `contextId: null` request) — the
- * same confinement issuer registration already has (an untrusted blueprint's
- * declared namespace must land only in the context IT provisions, never
- * elsewhere in the tenant). A tenant-wide registration is reachable only with
- * a root API key, outside any blueprint. If you need one, register it
- * directly against the API rather than through `namespaces:` here.
+ * namespace-registration endpoint confines an ordinary request to its own
+ * context unconditionally (the same confinement issuer registration already
+ * has: an untrusted blueprint's declared namespace must land only in the
+ * context IT provisions, never elsewhere in the tenant, unless it opts in
+ * below to something visible tenant-wide).
+ *
+ * `tenantWide: true` opts a namespace OUT of that per-context confinement,
+ * requesting the platform's own `NamespaceRequest` tenant-wide form instead
+ * (an omitted `contextId` on the wire — see the CLI loader). This is a
+ * DELIBERATE, narrow escape hatch, not the default: it requires the applying
+ * credential to hold a capability granted only to an account OWNER (never a
+ * blueprint's own say-so), and the CLI additionally refuses to request it at
+ * all unless invoked with an explicit opt-in flag — a blueprint declaring
+ * `tenantWide: true` cannot silently create a namespace visible to every
+ * context in the tenant. A namespace-name collision with another blueprint's
+ * (or a manual) tenant-wide registration is a hard failure, never a silent
+ * adopt — a tenant-wide row is co-owned by no single blueprint, so quietly
+ * treating an existing one as "this blueprint's" would subject this
+ * blueprint's entities to whichever registration got there first, untested
+ * and unreviewed. See the CLI's `--allow-tenant-wide-namespaces` flag for the
+ * full mechanism.
  *
  * Applied in the BOOTSTRAP-token phase (same as `issuers` — registration
  * requires the platform's `provisioning:c` capability, which only the
@@ -652,6 +798,24 @@ const BlueprintNamespaceSchema = z
      * free-form strings validated by grammar only.
      */
     entityBacked: z.boolean().optional(),
+    /**
+     * Request the platform's TENANT-WIDE registration form instead of this
+     * blueprint's own context — visible to every context in the account, not
+     * just the one this blueprint provisions. `false`/omitted (the default)
+     * is the ordinary, context-owned registration every other namespace here
+     * gets. Mutually exclusive with any future context-targeting field this
+     * schema may grow — there is exactly one way to say "not my own context"
+     * today.
+     *
+     * A blueprint declaring this does NOT get it automatically: the applying
+     * credential must separately hold a platform capability granted only to
+     * an account OWNER, and the CLI refuses to even request it unless
+     * explicitly told to (see `--allow-tenant-wide-namespaces`) — no flag,
+     * no request, regardless of what this field says. Setting this to `true`
+     * states the blueprint's INTENT; it is not, on its own, a grant of
+     * anything.
+     */
+    tenantWide: z.boolean().optional(),
     /**
      * This namespace's position in your account's specificity order (used to
      * break a tie when a caller holds two scope dimensions at once). Required
@@ -691,10 +855,12 @@ const BlueprintNamespaceSchema = z
  * co-occurrence rules the platform's own `NamespaceRequest` documents,
  * `specificityRank` uniqueness WITHIN this blueprint (a partial check — the
  * platform is the only party that can see the rest of the account's
- * namespaces, including `org`=1000/`client`=2000, so a collision with those
- * or another blueprint's registration still surfaces at apply, same as the
- * platform's own non-idempotent-registration collision), and `namespace`
- * uniqueness within this blueprint's own list.
+ * namespaces, including `org`=1000/`client`=2000 IF the account has actually
+ * registered them (the platform does not auto-provision org/client at
+ * signup — those ranks are only taken once an account explicitly registers
+ * them), so a collision with those or another blueprint's registration still
+ * surfaces at apply, same as the platform's own non-idempotent-registration
+ * collision), and `namespace` uniqueness within this blueprint's own list.
  */
 /** The platform's own DDB-key-embeddable identifier grammar — 1-64 chars, letters/digits/underscore/hyphen. */
 const MEMBERSHIP_FIELD_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -909,14 +1075,24 @@ const BlueprintSeedRecordSchema = z.discriminatedUnion('surface', [
 // running on the already-input-resolved doc (the install-time resolver
 // leaves these tokens literal — see inputs.ts).
 //
-// `member.*` joins this lint for the same reason (#936 R39, PM cold-pass finding
-// 2026-08-18): `${{ member.scope.<ns> }}` (and its `:<level>` selector form) is
+// `member.*` joins this lint for the same reason (PM cold-pass finding, 2026-08-18):
+// `${{ member.scope.<ns> }}` (and its `:<level>` selector form) is
 // the equivalent runtime per-membership placeholder, resolved server-side by
 // `NamespaceMembershipResolver` — also only meaningful inside a role's
 // dataScope, so a misplaced/typo'd one gets the same teach-by-error here that
 // self/under already got. (inputs.ts's DEFERRED_NAMESPACES gained the matching
 // entry in the same commit, so the token also survives install-time resolution
 // to reach this lint and the server at all.)
+//
+// Two features widened the legal zone further, both PLACEMENT
+// only (see `lintRoleAssumable` below for the narrower per-form grammar
+// `roleAssumable` additionally enforces):
+//   - `fragments.<name>` — a fragment IS a dataScope map (same
+//     shape `roles[].dataScope` is), so wherever it lands via `dataScopeRef`
+//     it must already have been legal to write inline.
+//   - `roleAssumable.<roleId>` — a SEPARATE top-level map (not
+//     nested under `roles` at all — see that field's own doc comment for
+//     why), so it needs its own path check distinct from `roles[].dataScope`.
 //
 // Broader than a strict single-segment match — the runtime grammar allows
 // deeper dotted paths (`self.scope.<ns>`, `under.self.<field>`, `member.scope.<ns>`
@@ -936,7 +1112,8 @@ function lintSelfTokenPlacement(value: unknown, ctx: z.RefinementCtx): void {
           code: z.ZodIssueCode.custom,
           path,
           message:
-            "'${{ self.* }}' / '${{ member.* }}' is a runtime placeholder — it is only valid inside a roles[].dataScope value",
+            "'${{ self.* }}' / '${{ member.* }}' is a runtime placeholder — it is only valid inside a " +
+            "roles[].dataScope value, a roleAssumable[] value, or a fragments[] value",
         });
       }
       return;
@@ -948,9 +1125,18 @@ function lintSelfTokenPlacement(value: unknown, ctx: z.RefinementCtx): void {
     if (node && typeof node === 'object') {
       for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
         // path === ['roles', <roleId>, <clauseIndex>] and key 'dataScope' opens
-        // the only subtree where self.* is allowed.
-        const entering =
-          inRoleDataScope || (path.length === 3 && path[0] === 'roles' && k === 'dataScope');
+        // the only per-clause subtree where self.* is allowed.
+        const inRoleDataScopeClause =
+          path.length === 3 && path[0] === 'roles' && k === 'dataScope';
+        // `roleAssumable.<roleId>` — the whole subtree under the
+        // top-level 'roleAssumable' key is a grant map; `inRoleDataScope`'s
+        // stickiness (`entering = inRoleDataScope || ...`) then covers every
+        // value under it, same mechanism `fragments` uses below.
+        const inRoleAssumable = path.length === 0 && k === 'roleAssumable';
+        // `fragments.<name>` — the whole subtree under the top-level
+        // 'fragments' key is a dataScope map, same reasoning.
+        const inFragments = path.length === 0 && k === 'fragments';
+        const entering = inRoleDataScope || inRoleDataScopeClause || inRoleAssumable || inFragments;
         walk(v, [...path, k], entering);
       }
     }
@@ -1270,6 +1456,7 @@ function lintDataScopeKeys(value: unknown, ctx: z.RefinementCtx): void {
   const bp = value as {
     accessProfile?: { dataScope?: Record<string, unknown> };
     roles?: Record<string, Array<{ dataScope?: Record<string, unknown> }>>;
+    fragments?: Record<string, Record<string, unknown>>;
   };
   for (const key of Object.keys(bp.accessProfile?.dataScope ?? {})) {
     lintDataScopeKey(key, ['accessProfile', 'dataScope', key], ctx);
@@ -1281,6 +1468,265 @@ function lintDataScopeKeys(value: unknown, ctx: z.RefinementCtx): void {
       }
     });
   }
+  // A fragment is exactly a dataScope map; its keys
+  // follow the identical grammar `roles[].dataScope`'s keys do.
+  for (const [name, fragment] of Object.entries(bp.fragments ?? {})) {
+    for (const key of Object.keys(fragment ?? {})) {
+      lintDataScopeKey(key, ['fragments', name, key], ctx);
+    }
+  }
+}
+
+// Every `dataScopeRef` must name a declared
+// `fragments` entry. Caught offline (parse/lint), not left to resolve to
+// `undefined` at expansion time (`expandDataScopeRefs`, below `parseBlueprint`)
+// — an unresolved ref there would either throw an unhelpful internal error or,
+// worse, silently mint a clause with NO dataScope at all (unconstrained reach),
+// depending on how the expansion step were written. Rejecting it here means
+// expansion can assume every ref it sees already resolves.
+function lintDataScopeRefs(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    fragments?: Record<string, unknown>;
+    roles?: Record<string, Array<{ dataScopeRef?: string }>>;
+  };
+  const declared = new Set(Object.keys(bp.fragments ?? {}));
+  for (const [roleId, clauses] of Object.entries(bp.roles ?? {})) {
+    clauses.forEach((clause, i) => {
+      if (clause.dataScopeRef === undefined) return;
+      if (!declared.has(clause.dataScopeRef)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['roles', roleId, i, 'dataScopeRef'],
+          message:
+            `dataScopeRef '${clause.dataScopeRef}' is not declared in fragments — declared fragments: ` +
+            (declared.size ? [...declared].join(', ') : '(none)'),
+        });
+      }
+    });
+  }
+}
+
+// `roles[].assumable`'s grammar, mirroring the platform's own
+// authoring-time grammar check for this field server-side.
+//
+// The rule the accepted forms satisfy, stated once because it decides every
+// future case rather than just today's: an `assumable` grant may depend on a
+// plain literal, or on the credential's own PRINCIPAL, and on nothing else.
+// The principal is the one identity dimension `/v1/auth/token/assume` can
+// never change, so a grant keyed on it means the same thing before and after
+// an assume. Three consequences:
+//
+//  - a bare `${{ self.<dim> }}` is meaningless here (it can only ever equal
+//    whatever identity already is, never a distinct value to become);
+//  - `${{ any }}` is not a concrete value;
+//  - `${{ under.self.scope.<ns> }}` resolves against the credential's own
+//    current value for a namespace an assume CAN move — so what the grant
+//    admitted would depend on what was last assumed, and where a profile
+//    composes several roles they all share one identity, so one role's grant
+//    would silently widen or narrow another's. Still legal in `dataScope`,
+//    where it is re-derived per write.
+//
+// So the legal forms are `${{ under.self.userId }}`,
+// `${{ member.scope.<ns>[:level] }}` (membership is resolved server-side
+// against the principal, not against a movable dimension), or a literal.
+const BARE_SELF_PLACEHOLDER_RE = /^\$\{\{\s*self\.[^}]*?\s*\}\}$/;
+const UNDER_SELF_PLACEHOLDER_RE = /^\$\{\{\s*under\.self\.userId\s*\}\}$/;
+const UNDER_SELF_SCOPE_PLACEHOLDER_RE =
+  /^\$\{\{\s*under\.self\.scope\.[a-z][a-z0-9_-]{1,31}\s*\}\}$/;
+// The `:level` selector shares the namespace segment's own grammar
+// byte-for-byte (lowercase-first, 2-32 chars) — a looser client-side pattern
+// here (e.g. tolerating uppercase or unbounded length) would lint clean and
+// pass `blueprint plan`, then 400 deep inside `vectros bootstrap`'s
+// `createRole` call, possibly after other resources already provisioned —
+// exactly the fail-fast promise this lint exists to keep.
+const MEMBER_SCOPE_PLACEHOLDER_RE =
+  /^\$\{\{\s*member\.scope\.[a-z][a-z0-9_-]{1,31}(?::[a-z][a-z0-9_-]{1,31})?\s*\}\}$/;
+const ANY_PLACEHOLDER_RE = /^\$\{\{\s*any\s*\}\}$/;
+
+/** `null` when `v` is a legal `assumable` value for the (already namespace-validated) public key, else why not. */
+function assumableValueError(publicKey: string, v: string): string | null {
+  if (UNDER_SELF_PLACEHOLDER_RE.test(v) || MEMBER_SCOPE_PLACEHOLDER_RE.test(v)) return null;
+  if (UNDER_SELF_SCOPE_PLACEHOLDER_RE.test(v)) {
+    return (
+      `assumable['${publicKey}'] value '${v}' resolves against your own current value for that ` +
+      'namespace, which an assume can itself change — so what this grant admits would depend on ' +
+      "what was last assumed. Use '${{ under.self.userId }}', " +
+      "'${{ member.scope.<namespace>[:level] }}', or a plain literal, all of which mean the same " +
+      "thing before and after an assume. ('${{ under.self.scope.<namespace> }}' remains valid in " +
+      'dataScope, where it is re-derived per write)'
+    );
+  }
+  if (ANY_PLACEHOLDER_RE.test(v)) {
+    return (
+      `assumable['${publicKey}'] value '${v}' is not a concrete value and cannot be authored as an ` +
+      'assumable grant — name the specific value(s) holders of this role may become'
+    );
+  }
+  if (BARE_SELF_PLACEHOLDER_RE.test(v)) {
+    return (
+      `assumable['${publicKey}'] value '${v}' is the bare self placeholder, which is tautological here ` +
+      '— it can only ever equal whatever identity currently is, never a distinct value to become. Use ' +
+      "'${{ under.self.userId }}', '${{ member.scope.<namespace>[:level] }}', or a plain literal " +
+      'instead'
+    );
+  }
+  if (SELF_TOKEN_RE.test(v)) {
+    return (
+      `assumable['${publicKey}'] value '${v}' is not a recognized runtime placeholder — use ` +
+      "'${{ under.self.userId }}' or '${{ member.scope.<namespace>[:level] }}'"
+    );
+  }
+  if (!SCOPE_VALUE_RE.test(v)) {
+    return (
+      `assumable['${publicKey}'] value '${v}' is not a valid scope value — 1-128 characters, starting ` +
+      "with a letter or digit and continuing with letters, digits, '_' or '-'"
+    );
+  }
+  return null;
+}
+
+/**
+ * Authoring-time mirror of `AccessProfileDB.validateRoleIds`:
+ * every `accessProfile.roleIds` entry must name a role this SAME blueprint
+ * declares in `roles` (the same-`(tenantId, contextId)` check is trivially
+ * satisfied by construction — a blueprint's own `roles` are always created in
+ * its own `contextId`, so there is no OTHER context to reference), and no id
+ * may repeat — rejected outright, never silently deduplicated.
+ * `.min(1)` on the schema already covers non-empty; this only checks resolution
+ * + duplicates.
+ */
+function lintAccessProfileRoleIds(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as { roles?: Record<string, unknown>; accessProfile?: { roleIds?: string[] } };
+  const roleIds = bp.accessProfile?.roleIds;
+  if (!roleIds) return;
+  const declaredRoles = new Set(Object.keys(bp.roles ?? {}));
+  const seen = new Set<string>();
+  roleIds.forEach((roleId, i) => {
+    const path: (string | number)[] = ['accessProfile', 'roleIds', i];
+    if (!declaredRoles.has(roleId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path,
+        message:
+          `accessProfile.roleIds names '${roleId}', which is not a role this blueprint declares in ` +
+          `roles — ` +
+          (declaredRoles.size ? `declared roles: ${[...declaredRoles].join(', ')}` : 'declared roles: (none)'),
+      });
+    }
+    if (seen.has(roleId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path,
+        message: `accessProfile.roleIds names '${roleId}' more than once — remove the duplicate`,
+      });
+    }
+    seen.add(roleId);
+  });
+}
+
+function lintRoleAssumable(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    roles?: Record<string, unknown>;
+    roleAssumable?: Record<string, Record<string, unknown>>;
+  };
+  const declaredRoles = new Set(Object.keys(bp.roles ?? {}));
+  for (const [roleId, assumable] of Object.entries(bp.roleAssumable ?? {})) {
+    if (!declaredRoles.has(roleId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['roleAssumable', roleId],
+        message:
+          `roleAssumable names '${roleId}', which is not a role this blueprint declares in roles — ` +
+          (declaredRoles.size ? `declared roles: ${[...declaredRoles].join(', ')}` : 'declared roles: (none)'),
+      });
+      continue;
+    }
+    for (const [key, values] of Object.entries(assumable)) {
+      const path: (string | number)[] = ['roleAssumable', roleId, key];
+      if (key === 'userId') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            "assumable cannot name the principal ('userId') — the principal is never assumable via " +
+            '/assume, and a grant for it would save but could never be exercised',
+        });
+        continue;
+      }
+      const ns = key.startsWith('scope:') ? key.slice('scope:'.length) : null;
+      const nsError = ns === null ? null : scopeNamespaceGrammarError(ns);
+      if (ns === null || nsError !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            ns === null
+              ? `'${key}' is not allowed — assumable keys must be a namespaced 'scope:<namespace>' key ` +
+                '(the principal cannot be named)'
+              : `assumable['${key}'] ${nsError}`,
+        });
+        continue;
+      }
+      if (!Array.isArray(values)) continue; // shape error — caught by the field schema itself
+      values.forEach((v, i) => {
+        if (typeof v !== 'string') return;
+        const err = assumableValueError(key, v);
+        if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, i], message: err });
+      });
+    }
+  }
+}
+
+/**
+ * Expand every `dataScopeRef` to the literal `dataScope`
+ * the named fragment declares, so `dataScopeRef` never survives past
+ * `parseBlueprint`. Runs AFTER `BlueprintSchema`'s superRefine has already
+ * confirmed every ref resolves (`lintDataScopeRefs`) — a lookup miss here
+ * would be this function's own bug, not an authoring error, so it is a
+ * defensive `??` fallback to an empty dataScope rather than a second
+ * validation pass.
+ *
+ * Deliberately NOT a zod `.transform()` on `BlueprintSchema` itself: that
+ * would change `z.infer<typeof BlueprintSchema>` — the exported `Blueprint`
+ * type every consumer (this package's own tests, `@vectros-ai/cli`) already
+ * writes fixtures against — from the schema's literal object shape to
+ * whatever the transform returns, a much bigger blast radius than this one
+ * feature needs. A plain post-parse function keeps `Blueprint` describing
+ * exactly what a blueprint LOOKS like (dataScopeRef included), while
+ * {@link parseBlueprint}'s documented behavior is that the value it RETURNS
+ * has already resolved every ref.
+ */
+function expandDataScopeRefs(bp: Blueprint): Blueprint {
+  if (!bp.roles) return bp;
+  const fragments = bp.fragments ?? {};
+  let changedAnyRole = false;
+  const roles: Record<string, BlueprintRoleClause[]> = {};
+  for (const [roleId, clauses] of Object.entries(bp.roles)) {
+    let changedThisRole = false;
+    const expandedClauses = clauses.map((clause) => {
+      if (clause.dataScopeRef === undefined) return clause;
+      changedThisRole = true;
+      const { dataScopeRef, ...rest } = clause;
+      if (!(dataScopeRef in fragments)) {
+        // Never reachable through the public parseBlueprint() API — the
+        // superRefine pass that runs first in the same call already rejects
+        // any dataScopeRef that doesn't resolve. This is a defensive check
+        // for a caller that ever invokes this function on its own or a
+        // future refactor that lets the two drift: falling back to an empty
+        // dataScope here would silently mint an UNCONSTRAINED clause, the
+        // worse of the two bad outcomes this lint's own doc comment already
+        // reasons through — so this throws instead of guessing.
+        throw new Error(
+          `expandDataScopeRefs: dataScopeRef '${dataScopeRef}' does not resolve against fragments — ` +
+            'this should have been caught by lintDataScopeRefs before parseBlueprint reaches this function',
+        );
+      }
+      return { ...rest, dataScope: fragments[dataScopeRef] };
+    });
+    roles[roleId] = changedThisRole ? expandedClauses : clauses;
+    changedAnyRole = changedAnyRole || changedThisRole;
+  }
+  return changedAnyRole ? { ...bp, roles } : bp;
 }
 
 // A seed's `surface` must be one the bound schema actually allows — e.g. a
@@ -1385,7 +1831,7 @@ function lintIssuerContext(value: unknown, ctx: z.RefinementCtx): void {
  *     (`provisioning:c`), before the per-context wildcard re-mint. Tenant-wide
  *     provisioning config, the same category as the app-context create itself.
  *     `issuers` specifically applies under a SECOND bootstrap-scoped mint,
- *     re-pinned to the blueprint's own context (`@vectros-ai/cli` #961) — the
+ *     re-pinned to the blueprint's own context (`@vectros-ai/cli` 0.16.0+) — the
  *     platform requires that combination (`provisioning:c` AND context
  *     confinement) for `POST/GET/DELETE /v1/auth/issuers`, which neither the
  *     first (default-pinned) bootstrap mint nor the per-context wildcard mint
@@ -1450,6 +1896,24 @@ export const BlueprintSchema = z
     seed: z.array(BlueprintSeedRecordSchema).optional(),
     /** Optional multi-clause roles, bound to principals via `access grant --role`. */
     roles: BlueprintRolesSchema.optional(),
+    /**
+     * Optional roleId → `POST /v1/auth/token/assume`
+     * entitlement grant, mirroring the platform's role create/update request
+     * and response shape for this field. Kept separate from `roles` rather
+     * than folded into a role entry — see {@link BlueprintRoleAssumableMapSchema}'s
+     * own doc comment for why. Every key must name a role this blueprint
+     * declares in `roles` (`lintRoleAssumable`).
+     */
+    roleAssumable: BlueprintRoleAssumableMapSchema.optional(),
+    /**
+     * Optional named `dataScope` fragments, each
+     * referenceable from a role clause via `dataScopeRef: <name>` instead of
+     * repeating the same map inline. Purely local authoring sugar: not a
+     * provisioned resource (absent from `BLUEPRINT_FIELD_PHASES`), and never
+     * survives `parseBlueprint` as a live reference — see
+     * {@link expandDataScopeRefs}.
+     */
+    fragments: BlueprintFragmentsSchema.optional(),
     /** Optional principals ensured-exist at apply; referenced via ${{ identities.* }}. */
     identities: IdentitiesDeclSchema.optional(),
     /**
@@ -1476,6 +1940,9 @@ export const BlueprintSchema = z
     lintIdentityOverrides(bp, ctx);
     lintNamespacedScopeArrays(bp, ctx);
     lintDataScopeKeys(bp, ctx);
+    lintDataScopeRefs(bp, ctx);
+    lintRoleAssumable(bp, ctx);
+    lintAccessProfileRoleIds(bp, ctx);
     lintSeedSurfaces(bp, ctx);
     lintIdentitySurfaces(bp, ctx);
     lintIssuerContext(bp, ctx);
@@ -1502,6 +1969,12 @@ export type BlueprintIssuer = z.infer<typeof BlueprintIssuerSchema>;
 export type BlueprintNamespace = z.infer<typeof BlueprintNamespaceSchema>;
 export type BlueprintRoleClause = z.infer<typeof BlueprintRoleClauseSchema>;
 export type BlueprintRoles = z.infer<typeof BlueprintRolesSchema>;
+/** A named, reusable `dataScope` map, referenced via a clause's `dataScopeRef`. */
+export type BlueprintFragments = z.infer<typeof BlueprintFragmentsSchema>;
+/** One role's `POST /v1/auth/token/assume` entitlement grant — the value type of `roleAssumable[roleId]`. */
+export type BlueprintRoleAssumable = z.infer<typeof BlueprintRoleAssumableSchema>;
+/** The top-level `roleAssumable` map: roleId → grant. */
+export type BlueprintRoleAssumableMap = z.infer<typeof BlueprintRoleAssumableMapSchema>;
 export type IdentityDecl = z.infer<typeof IdentityDeclSchema>;
 export type IdentitiesDecl = z.infer<typeof IdentitiesDeclSchema>;
 
@@ -1556,6 +2029,11 @@ export class BlueprintValidationError extends Error {
  * {@link BlueprintValidationError} on a malformed shape — with a readable,
  * multi-line `path: message` body and the structured issues on `.issues`. Does
  * NOT run the scope gate — that's the CLI's job (the trust boundary).
+ *
+ * The returned `Blueprint` has already had every
+ * `dataScopeRef` expanded to its fragment's literal `dataScope`
+ * ({@link expandDataScopeRefs}) — a caller (e.g. `@vectros-ai/cli`'s loader)
+ * never sees a `dataScopeRef` survive past this function.
  */
 export function parseBlueprint(input: unknown): Blueprint {
   const result = BlueprintSchema.safeParse(input);
@@ -1563,7 +2041,7 @@ export function parseBlueprint(input: unknown): Blueprint {
     const issues = toBlueprintIssues(result.error);
     throw new BlueprintValidationError(`Malformed blueprint:\n${renderIssues(issues)}`, issues);
   }
-  return result.data;
+  return expandDataScopeRefs(result.data);
 }
 
 /**

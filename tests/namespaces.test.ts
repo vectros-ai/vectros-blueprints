@@ -137,13 +137,12 @@ test('REJECTS membershipRecordType without membershipTargetField, and vice versa
   assert.ok(p2.includes('namespaces[0].membershipRecordType'), p2.join(', '));
 });
 
-test("REJECTS contextOwned and membershipContextId — every blueprint namespace is unconditionally context-owned, no such fields exist", () => {
-  // A blueprint applies under the CLI's bootstrap credential, and the
-  // platform confines namespace registration to the caller's own context
-  // unconditionally — even for a tenant-wide contextId:null request — so a
-  // tenant-wide registration is reachable only with a root API key, outside
-  // any blueprint. Both fields are `.strict()`-rejected as unknown rather
-  // than silently accepted and failing later at apply.
+test('REJECTS contextOwned and membershipContextId — not real fields; the one way to opt out of context-owned is tenantWide', () => {
+  // A namespace is owned by the blueprint's own context by DEFAULT; `tenantWide: true`
+  // is the one, deliberate way to request the platform's tenant-wide form instead (see
+  // the tenantWide tests below). contextOwned/membershipContextId were never real fields
+  // — both are `.strict()`-rejected as unknown rather than silently accepted and failing
+  // later at apply.
   assert.throws(
     () => parseBlueprint(minimal({ namespaces: [{ ...VALID_NAMESPACE, contextOwned: true }] } as unknown as Partial<Blueprint>)),
     BlueprintValidationError,
@@ -286,4 +285,72 @@ test('namespaces is entirely optional — omitting it is fine', () => {
 test('BLUEPRINT_FIELD_PHASES: namespaces is bootstrap-phase, same as issuers', async () => {
   const { BLUEPRINT_FIELD_PHASES } = await import('../src/types.js');
   assert.equal(BLUEPRINT_FIELD_PHASES.namespaces, 'bootstrap');
+});
+
+// ── tenantWide ────────────────────────────────────────────────────────────────
+
+test('accepts tenantWide: true', () => {
+  const b = parseBlueprint(minimal({ namespaces: [{ ...VALID_NAMESPACE, tenantWide: true }] }));
+  assert.equal(b.namespaces?.[0].tenantWide, true);
+});
+
+test('tenantWide is optional — an ordinary namespace declaration is unaffected', () => {
+  const b = parseBlueprint(minimal({ namespaces: [VALID_NAMESPACE] }));
+  assert.equal(b.namespaces?.[0].tenantWide, undefined);
+  // Byte-for-byte: no field silently appears on a declaration that didn't name it.
+  assert.deepEqual(b.namespaces, [VALID_NAMESPACE]);
+});
+
+test('tenantWide: false is accepted the same as omitting it', () => {
+  const b = parseBlueprint(minimal({ namespaces: [{ ...VALID_NAMESPACE, tenantWide: false }] }));
+  assert.equal(b.namespaces?.[0].tenantWide, false);
+});
+
+test('REJECTS a non-boolean tenantWide', () => {
+  // Deliberately malformed (wrong type) — `as never` to feed it past `minimal`'s
+  // Blueprint-typed overrides, same convention scope-entries.test.ts established.
+  const paths = issuePaths(minimal({ namespaces: [{ ...VALID_NAMESPACE, tenantWide: 'yes' } as never] }));
+  assert.ok(paths.includes('namespaces[0].tenantWide'), paths.join(', '));
+});
+
+test('tenantWide composes with entityBacked and membership fields — no special-casing between them', () => {
+  const b = parseBlueprint(
+    minimal({
+      schemas: WITH_TEAM_GRANT_SCHEMA,
+      namespaces: [
+        {
+          ...VALID_NAMESPACE,
+          tenantWide: true,
+          entityBacked: true,
+          membershipRecordType: 'team_grant',
+          membershipTargetField: 'userId',
+        },
+      ],
+    }),
+  );
+  assert.equal(b.namespaces?.[0].tenantWide, true);
+  assert.equal(b.namespaces?.[0].entityBacked, true);
+  assert.equal(b.namespaces?.[0].membershipRecordType, 'team_grant');
+});
+
+test('a tenantWide namespace still gets the ordinary uniqueness checks (name + specificityRank)', () => {
+  const dupName = issuePaths(
+    minimal({
+      namespaces: [
+        { ...VALID_NAMESPACE, tenantWide: true },
+        { namespace: 'team', specificityRank: 600 },
+      ],
+    }),
+  );
+  assert.ok(dupName.includes('namespaces[1].namespace'), dupName.join(', '));
+
+  const dupRank = issuePaths(
+    minimal({
+      namespaces: [
+        { ...VALID_NAMESPACE, tenantWide: true },
+        { namespace: 'project', specificityRank: 500 },
+      ],
+    }),
+  );
+  assert.ok(dupRank.includes('namespaces[1].specificityRank'), dupRank.join(', '));
 });

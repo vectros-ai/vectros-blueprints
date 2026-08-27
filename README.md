@@ -158,6 +158,67 @@ ships an `editor` role for this — join your own user to the context so you can
 browse and curate the knowledge base in the app. Role clauses pass the same
 data-plane scope gate as `accessProfile`.
 
+Instead of an inline `allowedActions` clause, `accessProfile` may declare
+**`roleIds`** — a list of one or more roles this SAME blueprint declares in
+`roles`, composed additively: the effective grant is each named role's own
+clauses, concatenated in the order listed (never merged, so each clause keeps
+meaning exactly what its own author wrote). `allowedActions`/`roleIds` are
+mutually exclusive — exactly one of the two — and a `roleIds`-composed profile
+carries no `dataScope`/`capabilities` of its own; author those on the
+referenced roles instead. Every id must resolve to a role declared in this
+blueprint, and no id may repeat:
+
+```yaml
+accessProfile:
+  roleIds: [case-handler, hr-admin]
+roles:
+  case-handler:
+    - allowedActions: [records:r:case, records:u:case]
+  hr-admin:
+    - allowedActions: [records:r:hr]
+```
+
+A blueprint may also declare a top-level **`fragments`** — a map of name →
+`dataScope`, purely an authoring convenience for when several role clauses
+would otherwise repeat an identical `dataScope` verbatim. Reference one from a
+clause with **`dataScopeRef`** instead of an inline `dataScope` — the two are
+mutually exclusive on the same clause, never both. A `dataScopeRef` is
+resolved to its fragment's literal `dataScope` before anything downstream
+(the CLI loader, the wire payload it sends) ever sees it — it is local sugar,
+never itself provisioned:
+
+```yaml
+fragments:
+  ownOrg:
+    "scope:org": ['${{ self.scope.org }}']
+roles:
+  case-handler:
+    - allowedActions: [records:cru:case]
+      dataScopeRef: ownOrg
+    - allowedActions: [search:r]
+      dataScopeRef: ownOrg
+```
+
+A blueprint may also declare a top-level **`roleAssumable`** — a map of
+`roleId` → grant, naming which values a holder of that role may become via
+`POST /v1/auth/token/assume`. It's a sibling of `roles`, not a field folded
+into a role's clause list, and every key it names must resolve to a role this
+same blueprint declares under `roles`. Its grammar is deliberately narrower
+than a clause's `dataScope`: every key must be a namespaced `scope:<ns>` (the
+principal — `userId` — can never be named here, unlike `dataScope`), and no
+value may be `null` (there's no tenant-level/owner-less reading to opt into —
+`/assume` always requests one concrete value). Values accept a plain literal,
+`${{ under.self.userId }}`, or `${{ member.scope.<namespace>[:level] }}`:
+
+```yaml
+roleAssumable:
+  hr-admin:
+    "scope:org": [org_engineering, org_sales]
+roles:
+  hr-admin:
+    - allowedActions: [records:r]
+```
+
 Both `accessProfile` and each role clause may also carry an optional
 **`capabilities`** — a list of platform capability names (distinct from the
 schema-level `capabilities` above), e.g. `capabilities: ['member-lifecycle']`.
@@ -171,7 +232,7 @@ notes before relying on it.
 
 A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
-audience, contextId, subClaim?, emailClaim? }`. Unlike `schemas`/`accessProfile`/
+audience, contextId, subClaim?, emailClaim?, userinfoUri? }`. Unlike `schemas`/`accessProfile`/
 `roles` (applied under a per-context token), issuers are applied in the loader's
 **bootstrap-token phase**, alongside app-context/service-principal creation —
 tenant-wide provisioning config that needs the bootstrap credential's owner-only
@@ -188,12 +249,10 @@ each in that context's own blueprint; that is no extra work, since the
 
 A blueprint may also declare top-level **`namespaces`** — entity-namespace
 registrations, each `{ namespace, specificityRank, entityBacked?, membershipRecordType?,
-membershipTargetField?, membershipLevelField?, membershipLevels? }`. Like `issuers`,
-these are applied in the loader's **bootstrap-token phase**, alongside app-context/
-service-principal creation. Every declared namespace is **always owned by the
-blueprint's own `contextId`** — there is no tenant-wide option, since the platform
-confines namespace registration to the credential's own context unconditionally,
-even for a tenant-wide request.
+membershipTargetField?, membershipLevelField?, membershipLevels?, tenantWide? }`. Like
+`issuers`, these are applied in the loader's **bootstrap-token phase**, alongside
+app-context/service-principal creation. Every declared namespace is **owned by the
+blueprint's own `contextId` by default**.
 
 - `namespace` — 2-32 chars, a lowercase letter first, then lowercase letters/digits/
   `_`/`-`. A closed set of words is rejected as reserved (`user`, `record`, `document`,
@@ -221,10 +280,19 @@ even for a tenant-wide request.
 - `membershipLevelField` + `membershipLevels` — optional, declared together: the
   field naming a grant's level (so the same user can hold different levels in
   different values of this namespace) and the complete set of level labels allowed.
+- `tenantWide` (optional, default `false`) — request the platform's tenant-wide
+  registration form (visible to every context in the account) instead of this
+  blueprint's own context. Declaring it is not a grant on its own: the applying
+  credential must separately hold OWNER-only authority, and the CLI refuses to even
+  request it without an explicit `--allow-tenant-wide-namespaces` flag at
+  `bootstrap`/apply time — a blueprint cannot make this happen by itself.
 
 Registration is **not idempotent server-side**: a re-apply whose declaration matches
 what's already registered converges silently, but one that disagrees with the live
-registration fails the apply rather than silently overwriting it.
+registration fails the apply rather than silently overwriting it. For a `tenantWide`
+namespace this includes a collision with a **different** blueprint's (or a manual)
+registration of the same name — that always fails rather than being silently adopted,
+since a tenant-wide row is co-owned by no single blueprint.
 
 A blueprint may also declare a top-level **`identities`** — a map of local name →
 principal declaration, each `{ kind, externalId, displayName?, metadata? }`. It

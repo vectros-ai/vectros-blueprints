@@ -82,12 +82,16 @@ test('issuers: REJECTS a contextId that fails the app-context grammar', () => {
 
 test('issuers: REJECTS an entry missing a required field (jwksUri)', () => {
   const { jwksUri: _jwksUri, ...withoutJwksUri } = VALID_ISSUER;
-  const paths = issuePaths(minimal({ issuers: [withoutJwksUri] }));
+  // Deliberately malformed (missing a required field) — same `as never` escape
+  // this file's own sibling assertions need, matching scope-entries.test.ts's
+  // established convention for feeding an intentionally-invalid shape to a
+  // helper typed against the VALID Blueprint shape.
+  const paths = issuePaths(minimal({ issuers: [withoutJwksUri as never] }));
   assert.ok(paths.some((p) => p.includes('jwksUri')), `expected a jwksUri issue, got ${JSON.stringify(paths)}`);
 });
 
 test('issuers: REJECTS an unknown key (.strict())', () => {
-  const paths = issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, scopeAction: 'ISSUER_MANAGE' }] }));
+  const paths = issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, scopeAction: 'ISSUER_MANAGE' } as never] }));
   assert.ok(paths.length > 0, `expected an unrecognized-key issue, got ${JSON.stringify(paths)}`);
 });
 

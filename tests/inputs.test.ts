@@ -533,7 +533,7 @@ test('under.*: an N-segment token embedded mid-string is re-emitted verbatim (in
   assert.equal(r.description, 'founder=${{ under.self.userId }} ok');
 });
 
-// #936 R39 / PM cold-pass finding (2026-08-18) — before `member` joined DEFERRED_NAMESPACES,
+// PM cold-pass finding (2026-08-18) — before `member` joined DEFERRED_NAMESPACES,
 // `${{ member.scope.<ns> }}` had NO deferred entry: it fails the flat two-segment
 // WHOLE_TOKEN_RE/INNER_REF_RE shape every non-deferred namespace is checked against, so it would
 // have failed install-time resolution outright as a "malformed reference" rather than surviving to
@@ -566,6 +566,29 @@ test('member.*: the leveled selector ${{ member.scope.team:lead }} token is left
 test('member.*: an N-segment token embedded mid-string is re-emitted verbatim (interpolate path)', () => {
   const r = resolved(doc({ description: 'team=${{ member.scope.team }} ok' }));
   assert.equal(r.description, 'team=${{ member.scope.team }} ok');
+});
+
+// Before `any` joined DEFERRED_BARE_TOKENS, `${{ any }}` (the platform's value-less
+// dataScope claim sentinel, already recognized by the CLI's own lint.ts) had NO deferred entry
+// either: it has no `.` at all, so it fails BOTH the flat WHOLE_TOKEN_RE/INNER_REF_RE shape and
+// the N-segment DEFERRED_INNER_RE shape (which requires at least one `.segment`) — the first
+// blueprint to actually author it in a role's dataScope hit "malformed reference" outright. This
+// is the bare-token mirror of the member.*/self.*/under.* tests above.
+
+test('any: a whole-value ${{ any }} token is left literal', () => {
+  const r = resolved(
+    doc({
+      roles: {
+        hr_admin: [{ allowedActions: ['records:c'], dataScope: { 'scope:client': ['${{ any }}'] } }],
+      },
+    }),
+  );
+  assert.equal(r.roles.hr_admin[0].dataScope['scope:client'][0], '${{ any }}');
+});
+
+test('any: an embedded token mid-string is re-emitted verbatim (interpolate path)', () => {
+  const r = resolved(doc({ description: 'claims ${{ any }} value ok' }));
+  assert.equal(r.description, 'claims ${{ any }} value ok');
 });
 
 test('a namespace that is a textual PREFIX of a deferred one, but not equal, still errors', () => {

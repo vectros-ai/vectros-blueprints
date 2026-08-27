@@ -3,6 +3,102 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.16.0 — 2026-08-27
+
+### Added
+
+- **`accessProfile.roleIds` — additive role composition for the blueprint's own
+  service-principal profile.** A new alternative to the existing
+  inline `allowedActions` clause: name one or more roles this same blueprint
+  declares in `roles`, and the profile's effective grant becomes each named
+  role's own clauses, concatenated in the order listed — mirrors
+  `AccessProfileDB`'s `roleId` → `roleIds` shape at the
+  authoring layer. Mutually exclusive with `allowedActions` (exactly one of
+  the two, enforced at parse time); a `roleIds`-composed profile has no inline
+  clause of its own, so `dataScope` and `capabilities` are rejected alongside
+  it — author those on the referenced role's own clause instead, where every
+  profile referencing it picks them up uniformly (the same posture
+  `roleAssumable` already takes for a `roleId`-referencing profile).
+  `identityOverrides` is unaffected — a profile-level field, independent of
+  where the clause list comes from. Every `roleIds` entry must resolve to a
+  role this blueprint itself declares (same-context by construction); a
+  duplicate entry is rejected outright, never silently deduplicated.
+  `@vectros-ai/cli` ≥ 0.19.0 required — it mints the composed AccessProfile
+  via the platform's `roleIds` field, creating the referenced roles first so
+  the reference always resolves on first apply.
+- **`issuers[].userinfoUri`** — declares the IdP's OIDC userinfo endpoint,
+  alongside the existing `subClaim`/`emailClaim`. Needs `@vectros-ai/sdk` ≥
+  0.41.0 (the platform field it forwards to) and `@vectros-ai/cli` ≥ 0.19.0
+  to apply it.
+
+### Fixed
+
+- **The install-time `${{ … }}` resolver rejected the value-less `${{ any }}` `dataScope`
+  sentinel as a "malformed reference".** It has no `.` at all, so it matched neither the
+  flat `namespace.name` shape nor the deferred `self`/`identities`/`under`/`member`
+  namespaces' (which all require at least one `.segment`) — the first blueprint to
+  actually author it in a role's `dataScope` hit this outright. Fixed by deferring the
+  bare token the same way the dotted runtime placeholders already are.
+
+## 0.15.0
+
+### Added
+
+- **A top-level `fragments:` block, and a role clause's `dataScopeRef: <name>`
+  field as sugar for reusing one.** Name a `dataScope` map once under
+  `fragments`, then reference it from any clause instead of repeating an
+  identical map across several — the exact duplication
+  `casework.blueprint.yaml`'s `case_handler` role carried (four clauses all
+  repeating `scope:org: ['${{ self.scope.org }}']`). Mutually exclusive with
+  an inline `dataScope` on the same clause; an unknown `dataScopeRef` is a
+  validation error at parse time. Purely local authoring sugar — expanded to
+  a literal, independent `dataScope` before `parseBlueprint` returns, so
+  `dataScopeRef` never reaches `@vectros-ai/cli`'s loader or the wire: the
+  `createRole` payload for a fragment-using blueprint is byte-identical to
+  the hand-inlined equivalent. An existing blueprint with no `fragments`
+  block is byte-for-byte unaffected. `@vectros-ai/cli` ≥ 0.18.0 additionally
+  renders the expanded, effective per-clause `dataScope` in `blueprint plan`
+  output for every role, not just a fragment-using one.
+
+- **A top-level `roleAssumable` map, wiring `Role.assumable` (the
+  `POST /v1/auth/token/assume` entitlement grant) into blueprint
+  authoring.** `roleAssumable.<roleId>` names, per `scope:<namespace>`, which
+  values a holder of that role may assume — mirroring the platform's role
+  create/update request grammar for this field exactly: the principal
+  (`userId`) can never be named as a key, and each value accepts a plain literal,
+  `${{ under.self.userId }}`, or `${{ member.scope.<namespace>[:level] }}`.
+  Three forms are rejected at parse time: a bare `${{ self.<dim> }}`
+  (tautological here — it can only equal whatever your identity already is),
+  `${{ any }}` (not a concrete value), and
+  `${{ under.self.scope.<namespace> }}` (it resolves against your own current
+  value for a namespace an assume can itself change, so what the grant admitted
+  would depend on what was last assumed; and where one access profile composes
+  several roles they share one identity, so one role's grant would silently
+  widen or narrow another's). That last form remains valid in `dataScope`,
+  where it is re-derived per write. Every accepted form therefore depends only
+  on a plain literal or on your own principal, which an assume can never
+  change. Every key must name a role this blueprint actually declares in
+  `roles`. Kept as a SEPARATE top-level map rather than folded into a role's
+  own entry — `roles[roleId]` stays exactly the plain clause array it always
+  was, so an existing blueprint (and any existing TypeScript consumer
+  indexing `roles` directly) is unaffected whether or not it adopts this
+  field.
+
+## 0.14.0
+
+### Added
+
+- **A `namespaces[]` entry can now declare `tenantWide: true`**, requesting the
+  platform's tenant-wide registration form (visible to every context in the
+  account) instead of this blueprint's own context. `false`/omitted (the
+  default) is the ordinary, context-owned registration every namespace got
+  before — an existing blueprint is byte-for-byte unaffected. Declaring the
+  field is a statement of intent only: it grants nothing on its own. The
+  applying credential must separately hold OWNER-only authority, and
+  `@vectros-ai/cli` ≥ 0.17.0 additionally refuses to even request it without an
+  explicit opt-in flag at apply time. See that package's changelog for the full
+  mechanism.
+
 ## 0.13.0
 
 ### Changed
