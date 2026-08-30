@@ -3,6 +3,42 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.17.0 — 2026-08-27
+
+### Added
+
+- **`companyName`** — a new, optional top-level scalar field, sibling to `contextName`. Where
+  `contextName` is the blueprint author's own fixed app identity (the same for every deployer),
+  `companyName` is meant to vary per install — typically templated from a deployer-supplied
+  `${{ inputs.x }}` value rather than hardcoded. Used for branding on platform-sent correspondence
+  (e.g. invite emails) alongside `contextName`, not as a replacement for it. See `companyNameOf`.
+- **`companyNameOf(blueprint)`** — reads `blueprint.companyName`, `undefined` when absent. No forced
+  default (unlike `contextNameOf`'s `MCP — <name>` fallback) — an absent company name means "not
+  supplied," not a placeholder baked into provisioned data.
+- **`schemas[].expectedScopeDims`** — advisory-only declaration of the
+  ownership dimensions a schema's records are typically scoped by (e.g.
+  `expectedScopeDims: ['org', 'client']`). Not sent to the platform, never
+  runtime-enforced — consumed only by `@vectros-ai/cli` ≥ 0.20.0's blueprint
+  lint (`partial-datascope-dimension-coverage`) to warn when a role/
+  `accessProfile` clause grants `r`/`u`/`d` on that typeName but its
+  `dataScope` names only SOME of these dims, silently leaving the rest
+  unconstrained — the read/write `dataScope`-coverage asymmetry, a
+  ratified, deliberate design decision this field helps an author notice
+  rather than changes. Same grammar as a
+  `dataScope` key with the `scope:` prefix stripped: a bare namespace name,
+  or `'userId'`. Fully optional; a schema with no `expectedScopeDims` never
+  trips the lint.
+
+### Fixed
+
+- Scrubbed internal issue references and a backend class name out of two
+  comments — visible in the published npm package's sourcemaps to anyone who
+  reads mapped source. Comment-only; no behavior change.
+- Scrubbed a second backend class name missed by the pass above — 4 more
+  comments in `types.ts`, found while grepping a downstream `@vectros-ai/cli`
+  build's bundled dist for the same leak class. Comment-only; no behavior
+  change.
+
 ## 0.16.0 — 2026-08-27
 
 ### Added
@@ -11,8 +47,8 @@ This project adheres to [Semantic Versioning](https://semver.org).
   service-principal profile.** A new alternative to the existing
   inline `allowedActions` clause: name one or more roles this same blueprint
   declares in `roles`, and the profile's effective grant becomes each named
-  role's own clauses, concatenated in the order listed — mirrors
-  `AccessProfileDB`'s `roleId` → `roleIds` shape at the
+  role's own clauses, concatenated in the order listed — mirrors the
+  platform's own `roleId` → `roleIds` shape at the
   authoring layer. Mutually exclusive with `allowedActions` (exactly one of
   the two, enforced at parse time); a `roleIds`-composed profile has no inline
   clause of its own, so `dataScope` and `capabilities` are rejected alongside
@@ -356,7 +392,7 @@ This project adheres to [Semantic Versioning](https://semver.org).
   `under` to a role clause's `dataScope` did not recognize it either, so a
   misplaced or typo'd one gave no local warning. Both are fixed together —
   `${{ member.scope.<ns>[:<level>] }}` now resolves (is left literal for
-  server-side resolution by `NamespaceMembershipResolver`) at any depth
+  server-side resolution against the caller's live membership) at any depth
   including the leveled selector, and is confined to a role clause's
   `dataScope` by the same lint as `self`/`under`.
 

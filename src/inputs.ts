@@ -132,12 +132,12 @@ const INNER_REF_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
  *
  * `member` joins the set for the same reason: `${{ member.scope.<ns> }}`
  * (and its `:<level>` selector form) is a runtime per-membership placeholder,
- * resolved server-side per request by `NamespaceMembershipResolver` — never at
- * install time. PM cold-pass finding (2026-08-18): before this, `member.*` had no
- * deferred entry, so a role's `dataScope` value using it would fail install-time
- * resolution outright (it fails the flat two-segment `INNER_REF_RE`/`WHOLE_TOKEN_RE`
- * shape and every non-deferred namespace is checked against exactly that), not just
- * escape the placement lint below.
+ * resolved server-side per request — never at install time. Found in review:
+ * before this, `member.*` had no deferred entry, so a role's `dataScope`
+ * value using it would fail install-time resolution outright (it fails the
+ * flat two-segment `INNER_REF_RE`/`WHOLE_TOKEN_RE` shape and every
+ * non-deferred namespace is checked against exactly that), not just escape
+ * the placement lint below.
  */
 const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under', 'member']);
 

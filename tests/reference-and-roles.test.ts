@@ -228,8 +228,8 @@ test('self: REJECTS ${{ under.self.userId }} in accessProfile.dataScope', () => 
   );
 });
 
-// PM cold-pass finding (2026-08-18) — `${{ member.scope.<ns> }}` is the membership
-// equivalent of `${{ self.* }}` (a runtime placeholder NamespaceMembershipResolver resolves
+// Found in review — `${{ member.scope.<ns> }}` is the membership
+// equivalent of `${{ self.* }}` (a runtime placeholder resolved
 // server-side, per request) and must get the identical placement lint: valid ONLY inside a role
 // clause's dataScope, flagged everywhere else. Before this, `member.*` had no lint entry at all —
 // a misplaced/typo'd one landed as a dead, unresolved literal with zero local warning.

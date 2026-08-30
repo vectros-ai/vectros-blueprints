@@ -40,6 +40,12 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   validation; throws `BlueprintValidationError` on a malformed shape.
 - `contextNameOf(blueprint)` — the app-context display name. Falls back to
   `MCP — <name>` when the blueprint omits `contextName`.
+- `companyNameOf(blueprint)` — the deploying organization's own display name, distinct from
+  `contextNameOf`: `contextName` is the blueprint author's fixed identity for the app (the same
+  for every deployer), `companyName` is meant to vary per install (typically templated from a
+  deployer-supplied `${{ inputs.x }}` value). Used for branding on platform-sent correspondence
+  (e.g. invite emails) alongside `contextName`, not as a replacement for it. Unlike
+  `contextNameOf`, has no forced default — returns `undefined` when the blueprint omits it.
 - `BUNDLED_BLUEPRINTS` / `BLUEPRINT_NAMES` / `getBlueprint(name)` — the
   curated library: `task-management` (the minimal authoring exemplar),
   `agentic-sdlc` (a whole-SDLC system of
@@ -79,6 +85,13 @@ A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
 
 A schema additionally accepts:
 
+- **`expectedScopeDims`** — advisory only: the ownership dimensions (bare namespace names, or
+  `userId` for the principal) a schema author expects every role's `dataScope` clause to cover for
+  this type. The CLI's blueprint lint warns when a role clause grants `r`/`u`/`d` on this type but
+  its `dataScope` names only *some* of these dims — the easiest way to leave a dimension
+  unintentionally unconstrained, since reads (unlike creates) never require full-dimension
+  `dataScope` coverage. It helps you notice that read/write asymmetry; it doesn't change it — the
+  asymmetry itself is deliberate platform behavior. Does not affect enforcement at runtime.
 - **`lookupFields`** — each entry is a bare field name (`"status"`), an object
   `{ fieldName, unique?, rangeEnabled?, sortBy?, allowOverflow? }` (one field),
   or an object `{ fieldNames, sortBy?, allowOverflow? }` (a **composite**: 2-3

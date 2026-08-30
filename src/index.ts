@@ -9,6 +9,7 @@ export {
   parseBlueprint,
   parseBlueprintJson,
   contextNameOf,
+  companyNameOf,
   type Blueprint,
   type BlueprintFieldDef,
   type BlueprintSchemaDef,

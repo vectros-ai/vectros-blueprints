@@ -9,6 +9,7 @@ import {
   parseBlueprint,
   parseBlueprintJson,
   contextNameOf,
+  companyNameOf,
   BlueprintValidationError,
   type Blueprint,
 } from '../src/types.js';
@@ -71,6 +72,30 @@ test('parseBlueprintJson rejects bad JSON, round-trips a serialized blueprint', 
 test('contextNameOf prefers explicit contextName, else derives from name', () => {
   assert.equal(contextNameOf(minimal({ contextName: 'Custom' })), 'Custom');
   assert.equal(contextNameOf(minimal({ name: 'widgets' })), 'MCP — widgets');
+});
+
+test('companyName is accepted as an optional top-level field, sibling to contextName', () => {
+  const b = parseBlueprint(minimal({ contextName: 'Widgets App', companyName: 'Acme Corp' }));
+  assert.equal(b.contextName, 'Widgets App');
+  assert.equal(b.companyName, 'Acme Corp');
+  // The two fields are genuinely distinct — one isn't derived from or overwriting the other.
+  assert.notEqual(b.contextName, b.companyName);
+});
+
+test('companyName is genuinely optional — absent is valid, unlike contextId/name', () => {
+  const b = parseBlueprint(minimal());
+  assert.equal(b.companyName, undefined);
+});
+
+test('companyName rejects an empty string (min(1), same posture as contextName)', () => {
+  assert.throws(() => parseBlueprint(minimal({ companyName: '' })), BlueprintValidationError);
+});
+
+test('companyNameOf returns the field verbatim, with NO forced default unlike contextNameOf', () => {
+  assert.equal(companyNameOf(minimal({ companyName: 'Acme Corp' })), 'Acme Corp');
+  // Deliberate asymmetry vs contextNameOf's `MCP — <name>` fallback: an absent companyName
+  // means "not supplied," not a placeholder baked into provisioned data.
+  assert.equal(companyNameOf(minimal()), undefined);
 });
 
 test('bundled registry includes the curated library + getBlueprint works', () => {

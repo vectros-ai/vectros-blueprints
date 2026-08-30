@@ -285,6 +285,20 @@ const BlueprintSchemaSchema = z
     // hop); immutable once set. Mirrors the `basedOn` field on the platform's
     // schema-create request.
     basedOn: z.string().min(1).optional(),
+    // ADVISORY ONLY — not sent to the platform, never runtime-enforced. The
+    // ownership dimensions this schema's records are typically scoped by
+    // (e.g. ['org', 'client']), declared so the CLI's blueprint lint can warn
+    // when a role clause grants r/u/d on this type but its `dataScope` names
+    // only SOME of these dims — a schema author's easiest way to leave a
+    // dimension unintentionally unconstrained, since reads (unlike creates)
+    // never require full-dimension `dataScope` coverage — this helps an
+    // author NOTICE that read/write asymmetry, not change it; the asymmetry
+    // itself is a ratified, deliberate platform behavior.
+    // Same grammar as a `dataScope` key with the `scope:` prefix stripped:
+    // a bare namespace name, or 'userId' for the principal dimension.
+    // Structural-only here (validated below by `lintExpectedScopeDims`); the
+    // cross-referencing lint against role clauses lives in `packages/cli`.
+    expectedScopeDims: z.array(z.string().min(1)).max(MAX_SCOPE_DIMENSIONS).optional(),
   })
   .strict()
   .superRefine((schema, ctx) => {
@@ -389,8 +403,8 @@ const BlueprintAccessProfileSchema = z
     //
     // Optional now: mutually exclusive with `roleIds` below (the
     // `.superRefine` on this schema enforces the XOR, mirroring the platform's
-    // own `AccessProfileDB.validateScopesXorRole`). Exactly one of the two
-    // authors this profile's grant.
+    // own access-profile scopes/role-composition XOR check). Exactly one of
+    // the two authors this profile's grant.
     allowedActions: z.array(z.string().min(1)).min(1).optional(),
     // Additive role composition: this profile's effective grant is
     // each named role's own clauses, concatenated in the order listed, instead of
@@ -458,9 +472,9 @@ const BlueprintAccessProfileSchema = z
   .superRefine((ap, ctx) => {
     // The XOR: exactly one of an inline clause (allowedActions,
     // optionally paired with dataScope/capabilities) or a role-composed
-    // reference (roleIds). Mirrors AccessProfileDB.validateScopesXorRole
-    // server-side — caught here, at authoring time, rather than left to 400 at
-    // mint.
+    // reference (roleIds). Mirrors the platform's own access-profile
+    // scopes/role-composition XOR check server-side — caught here, at
+    // authoring time, rather than left to 400 at mint.
     const hasInline = ap.allowedActions !== undefined;
     const hasRoleIds = ap.roleIds !== undefined;
     if (hasInline === hasRoleIds) {
@@ -591,8 +605,9 @@ const BlueprintRoleAssumableSchema = z.record(z.array(z.string().min(1)).min(1))
 const BlueprintRoleAssumableMapSchema = z.record(BlueprintRoleAssumableSchema);
 
 // A namespace name: a lowercase letter first, then lowercase letters,
-// digits, `_` or `-`, 2-32 chars — mirrors the platform `IdentityNamespaceDB`
-// grammar. The fixed surfaces are not namespaces and can never be entity kinds.
+// digits, `_` or `-`, 2-32 chars — mirrors the platform's own namespace-
+// registry grammar. The fixed surfaces are not namespaces and can never be
+// entity kinds.
 const IDENTITY_NAMESPACE_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const FORBIDDEN_IDENTITY_NAMESPACES = new Set(['record', 'document', 'entity', 'user']);
 
@@ -1075,14 +1090,14 @@ const BlueprintSeedRecordSchema = z.discriminatedUnion('surface', [
 // running on the already-input-resolved doc (the install-time resolver
 // leaves these tokens literal — see inputs.ts).
 //
-// `member.*` joins this lint for the same reason (PM cold-pass finding, 2026-08-18):
+// `member.*` joins this lint for the same reason (found in review):
 // `${{ member.scope.<ns> }}` (and its `:<level>` selector form) is
-// the equivalent runtime per-membership placeholder, resolved server-side by
-// `NamespaceMembershipResolver` — also only meaningful inside a role's
-// dataScope, so a misplaced/typo'd one gets the same teach-by-error here that
-// self/under already got. (inputs.ts's DEFERRED_NAMESPACES gained the matching
-// entry in the same commit, so the token also survives install-time resolution
-// to reach this lint and the server at all.)
+// the equivalent runtime per-membership placeholder, resolved server-side —
+// also only meaningful inside a role's dataScope, so a misplaced/typo'd one
+// gets the same teach-by-error here that self/under already got. (inputs.ts's
+// DEFERRED_NAMESPACES gained the matching entry in the same commit, so the
+// token also survives install-time resolution to reach this lint and the
+// server at all.)
 //
 // Two features widened the legal zone further, both PLACEMENT
 // only (see `lintRoleAssumable` below for the narrower per-form grammar
@@ -1269,7 +1284,7 @@ function scopeNamespaceGrammarError(namespace: string): string | null {
 const IDENTITY_PLACEHOLDER_WHOLE_RE = new RegExp(`^${IDENTITY_REF_LOOSE_RE.source}$`);
 
 // `accessProfile.identityOverrides` mirrors the platform's FULL
-// `AccessProfileDB.validateIdentityOverrides` rule, not just the value half:
+// identity-overrides validation rule, not just the value half:
 // every KEY must be `scope:<ns>` with a grammar-valid, non-forbidden `<ns>`
 // (a bare `orgId`/`clientId` — the retired legacy spellings this field's own
 // comment says are "gone" — or a forbidden namespace like `scope:tenant`
@@ -1477,6 +1492,44 @@ function lintDataScopeKeys(value: unknown, ctx: z.RefinementCtx): void {
   }
 }
 
+// Structural-only grammar check for `schemas[].expectedScopeDims` (advisory):
+// each entry must be a valid `dataScope`-KEY dimension name with the
+// `scope:` prefix already stripped — 'userId', or a grammar-valid,
+// non-forbidden namespace (the identical check `lintDataScopeKey` applies to
+// an actual `scope:<ns>` key, run here on the bare namespace instead). Also
+// rejects a duplicate dimension listed twice — meaningless, and would make
+// the CLI's coverage-cross-reference lint (packages/cli) count it once
+// either way, silently masking a copy/paste mistake.
+function lintExpectedScopeDims(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as { schemas?: Array<{ typeName?: string; expectedScopeDims?: unknown[] }> };
+  (bp.schemas ?? []).forEach((schema, i) => {
+    const dims = schema.expectedScopeDims;
+    if (!dims) return;
+    const seen = new Set<string>();
+    dims.forEach((raw, j) => {
+      const dim = String(raw);
+      const path = ['schemas', i, 'expectedScopeDims', j];
+      if (seen.has(dim)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `schema '${schema.typeName}': expectedScopeDims lists '${dim}' more than once.`,
+        });
+      }
+      seen.add(dim);
+      if (dim === 'userId') return;
+      const nsError = scopeNamespaceGrammarError(dim);
+      if (nsError !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `schema '${schema.typeName}': expectedScopeDims['${dim}'] ${nsError}`,
+        });
+      }
+    });
+  });
+}
+
 // Every `dataScopeRef` must name a declared
 // `fragments` entry. Caught offline (parse/lint), not left to resolve to
 // `undefined` at expansion time (`expandDataScopeRefs`, below `parseBlueprint`)
@@ -1586,9 +1639,9 @@ function assumableValueError(publicKey: string, v: string): string | null {
 }
 
 /**
- * Authoring-time mirror of `AccessProfileDB.validateRoleIds`:
- * every `accessProfile.roleIds` entry must name a role this SAME blueprint
- * declares in `roles` (the same-`(tenantId, contextId)` check is trivially
+ * Authoring-time mirror of the platform's own access-profile roleIds
+ * validation: every `accessProfile.roleIds` entry must name a role this SAME
+ * blueprint declares in `roles` (the same-`(tenantId, contextId)` check is trivially
  * satisfied by construction — a blueprint's own `roles` are always created in
  * its own `contextId`, so there is no OTHER context to reference), and no id
  * may repeat — rejected outright, never silently deduplicated.
@@ -1860,8 +1913,8 @@ function lintIssuerContext(value: unknown, ctx: z.RefinementCtx): void {
  * `runLoader` ever runs — see `assertNoUnresolvedIdentities`), not by either
  * loader phase, so shoehorning it into this two-value enum would misdescribe
  * it rather than document it. `name`/`version`/`description`/`contextId`/
- * `contextName` are the blueprint's own scalar identity, not a nested resource
- * block — no phase applies to them individually.
+ * `contextName`/`companyName` are the blueprint's own scalar identity, not a
+ * nested resource block — no phase applies to them individually.
  */
 export type LoaderPhase = 'bootstrap' | 'in-context';
 
@@ -1890,6 +1943,15 @@ export const BlueprintSchema = z
     }),
     /** Human-readable app-context name; defaults to `MCP — <name>` (see {@link contextNameOf}) when absent. */
     contextName: z.string().min(1).optional(),
+    /**
+     * The deploying organization's own display name — distinct from {@link contextName}.
+     * `contextName` is the blueprint author's fixed identity for the app (the same for every
+     * deployer); `companyName` is meant to vary per install, typically templated from a
+     * deployer-supplied `${{ inputs.x }}` value rather than hardcoded. Used for branding on
+     * platform-sent correspondence (e.g. invite emails) alongside `contextName` — not a
+     * replacement for it. See {@link companyNameOf}.
+     */
+    companyName: z.string().min(1).optional(),
     schemas: z.array(BlueprintSchemaSchema).default([]),
     accessProfile: BlueprintAccessProfileSchema,
     servicePrincipal: BlueprintServicePrincipalSchema,
@@ -1940,6 +2002,7 @@ export const BlueprintSchema = z
     lintIdentityOverrides(bp, ctx);
     lintNamespacedScopeArrays(bp, ctx);
     lintDataScopeKeys(bp, ctx);
+    lintExpectedScopeDims(bp, ctx);
     lintDataScopeRefs(bp, ctx);
     lintRoleAssumable(bp, ctx);
     lintAccessProfileRoleIds(bp, ctx);
@@ -2064,4 +2127,14 @@ export function parseBlueprintJson(json: string): Blueprint {
 /** The app-context display name, defaulting to `MCP — <name>` when {@link Blueprint.contextName} is absent. */
 export function contextNameOf(blueprint: Blueprint): string {
   return blueprint.contextName ?? `MCP — ${blueprint.name}`;
+}
+
+/**
+ * The deploying organization's own display name, or `undefined` when the blueprint doesn't declare
+ * {@link Blueprint.companyName}. Deliberately has NO forced default (unlike {@link contextNameOf}'s
+ * `MCP — <name>` fallback) — an absent company name should mean "not supplied," not a placeholder
+ * string baked into provisioned data.
+ */
+export function companyNameOf(blueprint: Blueprint): string | undefined {
+  return blueprint.companyName;
 }

@@ -533,7 +533,7 @@ test('under.*: an N-segment token embedded mid-string is re-emitted verbatim (in
   assert.equal(r.description, 'founder=${{ under.self.userId }} ok');
 });
 
-// PM cold-pass finding (2026-08-18) — before `member` joined DEFERRED_NAMESPACES,
+// Found in review — before `member` joined DEFERRED_NAMESPACES,
 // `${{ member.scope.<ns> }}` had NO deferred entry: it fails the flat two-segment
 // WHOLE_TOKEN_RE/INNER_REF_RE shape every non-deferred namespace is checked against, so it would
 // have failed install-time resolution outright as a "malformed reference" rather than surviving to
