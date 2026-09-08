@@ -162,3 +162,81 @@ test('issuers: the check is per-entry — a valid entry does not excuse a diverg
   assert.deepEqual(paths, ['issuers[1].contextId'],
     `expected exactly one issue, at index 1, got ${JSON.stringify(paths)}`);
 });
+
+// ── capturedClaims (0.43.0) ──────────────────────────────────────────────
+// The platform half shipped in 0.43.0; this block is the blueprint-authoring half, unblocked by the
+// SDK pin the field's own deferral NOTE named as its precondition. Bounds are transcribed from
+// IssuerRegistrationDB.MAX_CAPTURED_CLAIMS / MAX_CAPTURED_CLAIM_NAME_LENGTH.
+
+test('capturedClaims: omitting it is valid — the default is "capture nothing beyond email"', () => {
+  const bp = parseBlueprint(minimal({ issuers: [VALID_ISSUER] }));
+  assert.equal(bp.issuers?.[0].capturedClaims, undefined);
+});
+
+test('capturedClaims: accepts a list of claim names and preserves order', () => {
+  const bp = parseBlueprint(
+    minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['name', 'phone_number'] }] }),
+  );
+  assert.deepEqual(bp.issuers?.[0].capturedClaims, ['name', 'phone_number']);
+});
+
+test('capturedClaims: an explicit empty list is accepted (states "capture nothing" outright)', () => {
+  const bp = parseBlueprint(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: [] }] }));
+  assert.deepEqual(bp.issuers?.[0].capturedClaims, []);
+});
+
+test('capturedClaims: REJECTS a blank entry', () => {
+  assert.deepEqual(
+    issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['name', ''] }] })),
+    ['issuers[0].capturedClaims[1]'],
+  );
+});
+
+test('capturedClaims: REJECTS a name above the 64-character platform limit, and accepts one at exactly 64', () => {
+  assert.deepEqual(issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['a'.repeat(65)] }] })), [
+    'issuers[0].capturedClaims[0]',
+  ]);
+  assert.deepEqual(issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['a'.repeat(64)] }] })), []);
+});
+
+test('capturedClaims: REJECTS more than 20 entries, and accepts exactly 20', () => {
+  const names = (n: number) => Array.from({ length: n }, (_, i) => `claim_${i}`);
+  assert.deepEqual(issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: names(21) }] })), [
+    'issuers[0].capturedClaims',
+  ]);
+  assert.deepEqual(issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: names(20) }] })), []);
+});
+
+test('capturedClaims: REJECTS a duplicate rather than deduplicating, naming the SECOND occurrence', () => {
+  // The platform rejects rather than dedupes; the index points at the entry to delete, not at the list.
+  assert.deepEqual(
+    issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['name', 'phone', 'name'] }] })),
+    ['issuers[0].capturedClaims[2]'],
+  );
+});
+
+test('capturedClaims: is still subject to .strict() siblings — an unknown issuer key is rejected', () => {
+  assert.deepEqual(
+    issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['name'], capturedClaim: ['x'] }] })),
+    ['issuers[0]'],
+  );
+});
+
+test('capturedClaims: REJECTS a whitespace-only name, not just an empty one', () => {
+  // The message says "non-blank", so the check must be non-BLANK. `z.string().min(1)` is a LENGTH
+  // check and admits ' ' — the platform rejects on isBlank(), and the CLI's own --captured-claim
+  // rejects a blank one, so a length-only check here made the two adopters of one platform rule disagree
+  // and produced the "lints clean, then 400s at apply" shape this package exists to prevent.
+  for (const blank of [' ', '   ', '\t', '\n']) {
+    assert.deepEqual(
+      issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: [blank] }] })),
+      ['issuers[0].capturedClaims[0]'],
+      `expected ${JSON.stringify(blank)} to be rejected`,
+    );
+  }
+  // A name with INTERIOR whitespace is not blank and stays valid — trim, not "no spaces".
+  assert.deepEqual(
+    issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['given name'] }] })),
+    [],
+  );
+});

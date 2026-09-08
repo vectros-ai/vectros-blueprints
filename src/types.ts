@@ -90,6 +90,20 @@ const BlueprintFieldDefSchema = z
     // the `s` reveal scope for this record type (SchemaRequest.FieldDef.sensitive).
     // Format passthrough — the loader forwards it to createSchema. Default false.
     sensitive: z.boolean().optional(),
+    // Keep this field on the RECORD ROW when the payload is stored out of line (a large record, or a
+    // LARGE_PAYLOAD storage profile), so it appears in list/lookup projections without
+    // `includePayload`.
+    //
+    // Load-bearing for triggers: a trigger rule's `fields` may name a field only if it is `inline`,
+    // `filterable`, or a lookup field — and never `sensitive`. So this is the flag that makes an
+    // otherwise-ordinary field projectable into a triggered script's `input.record`. Mutually
+    // exclusive with `sensitive` (the platform refuses the combination). The platform also refuses,
+    // with a 409, removing whatever keeps a field projectable while a live trigger rule still
+    // projects it — dropping `inline` OR `filterable` OR the lookup that carried it, not just this
+    // flag.
+    //
+    // Format passthrough — the loader forwards it to createSchema. Default false.
+    inline: z.boolean().optional(),
     // Reference-field surface — a typed foreign-key link to another record. The
     // platform (SchemaRequest.FieldDef) requires BOTH targetTypeName AND
     // targetSurface on a reference field; the blueprint format uses the SAME names
@@ -114,6 +128,18 @@ const BlueprintFieldDefSchema = z
   })
   .strict()
   .superRefine((field, ctx) => {
+    // The platform refuses `inline` together with `sensitive`: a sensitive field is blind-indexed
+    // and masked, so keeping a readable copy on the row would defeat it. Caught here so it is an
+    // authoring error rather than a 400 partway through an apply.
+    if (field.inline === true && field.sensitive === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['inline'],
+        message:
+          "a field cannot be both 'inline' and 'sensitive' — a sensitive field is blind-indexed and " +
+          'masked in responses, so it can never be projected into a trigger script; drop one of the two',
+      });
+    }
     const isReference = field.fieldType === 'reference';
     const hasRefKeys =
       field.targetTypeName !== undefined ||
@@ -228,11 +254,28 @@ const BlueprintLookupFieldSchema = z.union([
     }),
 ]);
 
-// Schema capabilities — today just `auditHistory` (platform default true). We
-// surface it so a blueprint's audit posture is self-documenting + reviewable.
+// Schema capabilities. We surface these so a blueprint's posture is
+// self-documenting + reviewable rather than set out of band.
+//
+// `auditHistory` — platform default true.
+//
+// `triggersEnabled` — platform default FALSE, opt-in. Records of a schema only
+// fire async trigger rules when their schema declares this. It is deliberately
+// an ENABLE and not a place to define triggers: the rules themselves are their
+// own `triggers[]` entries and their own server-side rows. Two consequences a
+// blueprint author sees directly: declaring a `triggers[]` entry against a
+// schema that has not opted in is REFUSED (here at plan time, and again by the
+// platform), and the two capabilities are independent — turning audit history
+// off does not turn triggers off.
+//
+// Note that a schema update replaces `capabilities` in full when the block is
+// supplied, so declaring other capabilities without `triggersEnabled` clears it.
+// The platform refuses that while trigger rules still reference the schema, but
+// keep it declared rather than relying on the refusal.
 const BlueprintCapabilitiesSchema = z
   .object({
     auditHistory: z.boolean().optional(),
+    triggersEnabled: z.boolean().optional(),
   })
   .strict();
 
@@ -396,6 +439,61 @@ const GrantedCapabilitiesSchema = z
     });
   });
 
+/**
+ * `assignable_roles` — the designated-roleId allow-list restricting WHICH named roles a clause may
+ * compose into a delegated AccessProfile (`roleIds` composition). Orthogonal to
+ * `allowedActions`/`dataScope`: it narrows which roles this clause's authority may hand out, not how
+ * much data it reaches.
+ *
+ * Bounds transcribed from the platform's `ScopeClause.validateAssignableRoles` +
+ * `RoleDB.ROLE_ID_PATTERN`. Three rules that are easy to get wrong, all deliberate platform-side:
+ *
+ * - **Absent means UNRESTRICTED** (default-open), matching `data_scope`'s own posture. A tenant opts
+ *   INTO the restriction by adding the field.
+ * - **An EMPTY list is rejected**, not read as "restricted to nothing" — an empty list states no
+ *   rule, so the platform makes you omit the field instead. Collapsing `[]` and absent into two
+ *   different meanings is exactly the silent misreading this refuses to allow.
+ * - **A duplicate is rejected**, not deduplicated.
+ *
+ * Entries are NOT lint-checked against this blueprint's own `roles` block: a clause may legitimately
+ * name a roleId that already exists in the context, or one another blueprint declares. Only the
+ * FORMAT is knowable offline.
+ */
+const MAX_ASSIGNABLE_ROLES = 20;
+const ROLE_ID_RE = /^[a-z][a-z0-9-]{2,30}$/;
+
+const AssignableRolesSchema = z
+  .array(
+    z.string().regex(ROLE_ID_RE, {
+      message:
+        "an assignableRoles entry must be a roleId: 3-31 chars, a lowercase letter first, then " +
+        "lowercase letters/digits/dashes (e.g. 'case-handler')",
+    }),
+  )
+  .min(1, {
+    message:
+      'assignableRoles must either be omitted (no roleId restriction) or name at least one roleId — ' +
+      'an empty list states no rule',
+  })
+  .max(MAX_ASSIGNABLE_ROLES, {
+    message: `assignableRoles accepts at most ${MAX_ASSIGNABLE_ROLES} entries`,
+  })
+  .optional()
+  .superRefine((roleIds: readonly string[] | undefined, ctx: z.RefinementCtx) => {
+    if (!roleIds) return;
+    const seen = new Set<string>();
+    roleIds.forEach((rid, i) => {
+      if (seen.has(rid)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i],
+          message: `assignableRoles names '${rid}' more than once — list it once`,
+        });
+      }
+      seen.add(rid);
+    });
+  });
+
 const BlueprintAccessProfileSchema = z
   .object({
     // Validated structurally here; the SCOPE GATE (in @vectros-ai/cli) is
@@ -467,6 +565,13 @@ const BlueprintAccessProfileSchema = z
     // a person is bound to. The gate should weigh the two separately rather
     // than reuse one policy for both.
     capabilities: GrantedCapabilitiesSchema,
+    // Optional roleId allow-list on this profile's own inline clause — see
+    // {@link AssignableRolesSchema}. Allowed here for the same symmetry reason `capabilities` is:
+    // the platform models an access profile's scopes as a list of the SAME ScopeClause a role clause
+    // uses, and the loader already builds this profile as one such clause. Only meaningful when the
+    // clause grants role-composing authority in the first place (`profiles:c`-shaped); on a
+    // clause that grants none it is inert rather than an error, exactly as on the platform.
+    assignableRoles: AssignableRolesSchema,
   })
   .strict()
   .superRefine((ap, ctx) => {
@@ -514,6 +619,16 @@ const BlueprintAccessProfileSchema = z
             'no inline clause of its own; author capabilities on the referenced role\'s clause instead',
         });
       }
+      if (ap.assignableRoles !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['assignableRoles'],
+          message:
+            "accessProfile.assignableRoles is not valid alongside 'roleIds' — a role-composed " +
+            'profile has no inline clause of its own; author assignableRoles on the referenced ' +
+            "role's clause instead",
+        });
+      }
     }
   });
 
@@ -547,6 +662,7 @@ const BlueprintRoleClauseSchema = z
     dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
     dataScopeRef: z.string().min(1).optional(),
     capabilities: GrantedCapabilitiesSchema,
+    assignableRoles: AssignableRolesSchema,
   })
   .strict()
   .superRefine((c, ctx) => {
@@ -603,6 +719,225 @@ const BlueprintRoleAssumableSchema = z.record(z.array(z.string().min(1)).min(1))
 // fragment name — `lintRoleAssumable` below is this field's twin of
 // `lintDataScopeRefs`, checking every key names a DECLARED role).
 const BlueprintRoleAssumableMapSchema = z.record(BlueprintRoleAssumableSchema);
+
+// The blueprint-authoring surface for an async trigger rule: "when a schema record fires this
+// event, invoke this script version under this grant/manifest." The rule FIRES: a matching record
+// write on a `triggersEnabled` schema dispatches the script asynchronously, under the grant declared
+// here, so this clause is live authority rather than a dormant declaration.
+//
+// `schemaName` is the schema's declared `typeName` — the blueprint author writes the NAME, not a
+// platform-assigned id, the same self-reference pattern `seed[].typeName` already uses
+// (`lintTriggerFiringSourceSchemas` below resolves it against this SAME blueprint's `schemas`; the
+// CLI loader resolves the name to a schemaId at apply time, mirroring how a schema reference already
+// works — see `TriggerRuleRequest.FiringSourceRequest` server-side, which takes the resolved id).
+const BlueprintTriggerFiringSourceSchema = z
+  .object({
+    schemaName: z.string().min(1),
+    event: z.enum(['CREATE', 'UPDATE', 'DELETE']),
+  })
+  .strict();
+
+// A trigger's script reference — `version` is either a pinned decimal-integer string (the default,
+// auditable-forever shape) or the literal 'latest' (the floating opt-in, resolved at FIRE time;
+// declare-time only checks the script NAME has at least one version).
+const SCRIPT_VERSION_INTEGER_RE = /^[1-9][0-9]*$/;
+const BlueprintTriggerScriptRefSchema = z
+  .object({
+    name: z.string().min(1),
+    version: z.string().min(1),
+  })
+  .strict()
+  .superRefine((ref, ctx) => {
+    if (ref.version !== 'latest' && !SCRIPT_VERSION_INTEGER_RE.test(ref.version)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message:
+          `scriptRef.version '${ref.version}' is invalid — must be a positive decimal integer ` +
+          "(as a string, e.g. '3') or the literal 'latest'",
+      });
+    }
+  });
+
+// A trigger's operation manifest — declared and shape-validated here, and ENFORCED AT EXECUTION by
+// the platform: a host-object verb outside the manifest is refused even where the grant would permit
+// it, and the execution is recorded as a manifest violation. (This comment said "NOT ENFORCED until
+// a dispatcher exists" while that was true; dispatch and manifest enforcement both ship as of the
+// release that made triggers fire.)
+//
+// SHAPE-only validation here, the same posture `capabilities` (GrantedCapabilitiesSchema, above)
+// already takes in this package: this FORMAT package does not hold the platform's live host-object
+// verb catalog, so a well-formed but not-yet-recognized verb parses without error here rather than
+// going stale against a platform release this package doesn't track. The platform rejects an
+// unrecognized verb at declare time and names the set it accepts.
+const MANIFEST_VERB_RE = /^[a-z]+(?:\.[a-z]+)+$/;
+const BlueprintTriggerManifestSchema = z
+  .array(
+    z.string().min(1).regex(MANIFEST_VERB_RE, {
+      message: "a manifest entry must be '<noun>.<verb>' (e.g. 'records.update')",
+    }),
+  )
+  .optional();
+
+// A single trigger declaration. Grant is XOR — exactly one of `roleIds` (role composition) or an
+// inline clause (`allowedActions`, optionally `dataScope`/`capabilities`) — mirroring
+// `BlueprintAccessProfileSchema`'s XOR above byte-for-byte: a trigger's grant reuses the exact same
+// platform shape an access profile's `roleIds`/`scopes` XOR already uses, rather than a bespoke
+// grant syntax, so the authoring surface mirrors it too.
+const BlueprintTriggerEntrySchema = z
+  .object({
+    firingSource: BlueprintTriggerFiringSourceSchema,
+    scriptRef: BlueprintTriggerScriptRefSchema,
+    allowedActions: z.array(z.string().min(1)).min(1).optional(),
+    roleIds: z.array(z.string().min(1)).min(1).optional(),
+    dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    capabilities: GrantedCapabilitiesSchema,
+    manifest: BlueprintTriggerManifestSchema,
+    /**
+     * REQUIRED. The record fields this rule projects into its script's `input.record` — and, on an
+     * UPDATE firing, `input.previous` (the same fields as they were before the write). On a DELETE
+     * firing `input.record` carries these fields from the deleted row, which is the only way a
+     * script can see anything of it.
+     *
+     * **An empty list is the "I project nothing" declaration**, not an omission: the script still
+     * receives `input.recordId`. It is required rather than defaulted precisely so that projecting
+     * nothing is something an author STATES, not something they get by forgetting the field.
+     *
+     * Every entry must name a field the schema keeps INLINE — declared `inline: true`, or
+     * `filterable`, or used as a lookup field (a leg of one, or its `sortBy` target) — and never one
+     * marked `sensitive`.
+     * `lintTriggerFields` checks that against the schema this blueprint declares; the platform
+     * checks it again, and refuses a schema update that would un-inline a field a live rule still
+     * projects.
+     *
+     * A field the record does not carry arrives as `undefined`, never null. `record` and `previous`
+     * together are capped at 224 KB serialised — a firing whose projected input exceeds that is not
+     * run, and is recorded as an `INPUT_TOO_LARGE` failure naming the size.
+     */
+    fields: z.array(z.string().min(1)),
+  })
+  .strict()
+  .superRefine((entry, ctx) => {
+    const hasInline = entry.allowedActions !== undefined;
+    const hasRoleIds = entry.roleIds !== undefined;
+    if (hasInline === hasRoleIds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['roleIds'],
+        message: hasInline
+          ? "a trigger entry carries both 'allowedActions' and 'roleIds' — provide exactly one: an " +
+            "inline clause (allowedActions, optionally dataScope/capabilities) OR a role composition " +
+            "(roleIds), never both"
+          : "a trigger entry carries neither 'allowedActions' nor 'roleIds' — provide exactly one: an " +
+            "inline clause (allowedActions, optionally dataScope/capabilities) OR a role composition " +
+            "(roleIds)",
+      });
+      return;
+    }
+    // A roleIds-composed entry has no inline clause to hang a dataScope/capability grant on — same
+    // reasoning as BlueprintAccessProfileSchema's identical carve-out above.
+    if (hasRoleIds) {
+      if (entry.dataScope !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['dataScope'],
+          message:
+            "a trigger entry's dataScope is not valid alongside 'roleIds' — a role-composed entry has " +
+            "no inline clause of its own; author dataScope on the referenced role's clause instead",
+        });
+      }
+      if (entry.capabilities !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['capabilities'],
+          message:
+            "a trigger entry's capabilities is not valid alongside 'roleIds' — a role-composed entry " +
+            "has no inline clause of its own; author capabilities on the referenced role's clause instead",
+        });
+      }
+    }
+  });
+
+// Optional top-level `triggers`: a map of triggerName -> declaration. Applied
+// in-context (the same phase as roles/accessProfile — see BLUEPRINT_FIELD_PHASES below). Shaped
+// like `BlueprintRolesSchema` above (a top-level record keyed by name), but each VALUE is a single
+// declaration object, not a clause array — a trigger has exactly one firing rule, not a list of
+// alternative ones.
+const BlueprintTriggersSchema = z.record(BlueprintTriggerEntrySchema);
+
+// ---------------------------------------------------------------------------
+// `scripts` — the source a blueprint SHIPS, as opposed to the `scriptRef` a
+// trigger merely NAMES.
+// ---------------------------------------------------------------------------
+//
+// A trigger's `scriptRef` is a pure reference: it names a script that must already exist in the
+// target context, and the platform validates that AT DECLARE TIME (a rule naming a script with no
+// versions is refused with a 400). Without this block a blueprint could name a script it had no way
+// to ship, so the documented adoption flow broke in the middle — declare the rule here, drop to the
+// raw API to create the script it runs, come back.
+//
+// WHAT AN ENTRY DECLARES, AND WHAT IT DELIBERATELY DOES NOT. A script is versioned and IMMUTABLE per
+// version: the platform assigns `scriptVersion` itself, auto-incrementing from 1 on every push, and
+// there is no update surface. So an entry declares a name (the map key) and the CURRENT SOURCE for
+// that name — never a version number, which is not the author's to choose.
+//
+// SOURCE IS INLINE, NOT A PATH, AND THAT IS A SECURITY PROPERTY RATHER THAN A LIMITATION. A shipped
+// script runs under a trigger's declared grant, so it is live authority; a blueprint is a versioned,
+// REVIEWED bundle. Keeping the source inside the bundle keeps what runs inside what was reviewed —
+// a path indirection would let a blueprint pull in code the reviewer of this file never saw. (It is
+// also what lets this package stay filesystem-free, which it must: it is a pure format + validation
+// library, and its own bundled blueprints are objects with no file to resolve a path against.)
+const SCRIPT_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// Both caps are the platform's own, in UTF-8 BYTES — measured with TextEncoder rather than
+// `.max()`, which counts UTF-16 code units and would let a multi-byte source past a byte limit.
+const SCRIPT_SOURCE_MAX_BYTES = 300_000;
+const SCRIPT_INPUT_CONTRACT_MAX_BYTES = 50_000;
+
+const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
+
+const BlueprintScriptEntrySchema = z
+  .object({
+    /**
+     * The script's source text, shipped verbatim.
+     *
+     * NOTHING PARSES THIS — not this package, and not the platform, which stores it as-is. A syntax
+     * error is therefore invisible until the version first RUNS, where it surfaces as a
+     * `SCRIPT_ERROR` from the trigger rule that dispatched it. Validation here is limited to what
+     * can be checked without a JS parser: non-blank, and within the platform's byte cap.
+     */
+    source: z
+      .string()
+      // No `.min(1)` in front of this: it would ALSO fire on '', so an empty source reported two
+      // issues for one mistake. The blank check subsumes it and says the more useful thing.
+      .refine((s) => s.trim().length > 0, { message: "'source' must not be blank" })
+      .refine((s) => utf8Bytes(s) <= SCRIPT_SOURCE_MAX_BYTES, {
+        message:
+          `'source' exceeds the platform's ${SCRIPT_SOURCE_MAX_BYTES.toLocaleString('en-US')}-byte ` +
+          'cap (measured in UTF-8 bytes, not characters)',
+      }),
+    /**
+     * Optional free-text description of the input shape this script expects.
+     *
+     * DESCRIPTIVE ONLY — neither this package nor the platform validates a firing's input against
+     * it. It documents the contract for a human reading the blueprint; it does not enforce one.
+     */
+    declaredInputContract: z
+      .string()
+      .min(1)
+      .refine((s) => utf8Bytes(s) <= SCRIPT_INPUT_CONTRACT_MAX_BYTES, {
+        message:
+          `'declaredInputContract' exceeds the platform's ` +
+          `${SCRIPT_INPUT_CONTRACT_MAX_BYTES.toLocaleString('en-US')}-byte cap (measured in UTF-8 ` +
+          'bytes, not characters)',
+      })
+      .optional(),
+  })
+  .strict();
+
+// Optional top-level `scripts`: a map of scriptName -> declaration, keyed by name exactly as
+// `triggers` and `roles` are. Applied IN-CONTEXT and, critically, BEFORE the triggers that may
+// reference it — see BLUEPRINT_FIELD_PHASES and the loader's own ordering note.
+const BlueprintScriptsSchema = z.record(BlueprintScriptEntrySchema);
 
 // A namespace name: a lowercase letter first, then lowercase letters,
 // digits, `_` or `-`, 2-32 chars — mirrors the platform's own namespace-
@@ -683,6 +1018,45 @@ const BlueprintServicePrincipalSchema = z
 // rather than duplicated.
 const ISSUER_ID_RE = CONTEXT_ID_RE;
 
+/**
+ * Structural bounds on a captured/projected identity-claim NAME list, transcribed from the
+ * platform's own `IssuerRegistrationDB.MAX_CAPTURED_CLAIMS` / `MAX_CAPTURED_CLAIM_NAME_LENGTH`.
+ *
+ * Duplicated here (rather than inferred) for the same reason every other grammar in this file is:
+ * the blueprint is validated at AUTHORING time, offline, with no platform round trip — so a bound
+ * the platform enforces has to be re-stated to be caught before apply time. Keep in lockstep with the
+ * platform; a divergence surfaces as a blueprint that lints clean and then 400s at apply, which is
+ * precisely what authoring-time validation exists to prevent.
+ */
+const MAX_CAPTURED_CLAIMS = 20;
+const MAX_CAPTURED_CLAIM_NAME_LENGTH = 64;
+
+/**
+ * A `superRefine` that rejects a repeated claim name, reporting the SECOND occurrence's own index so
+ * the message points at the entry the author should delete rather than at the list as a whole.
+ *
+ * The platform rejects duplicates rather than deduplicating them, and this mirrors that: a repeated
+ * name is never unsafe (two loop iterations resolve the same map key), but it is a caller-visible
+ * sign the declaration does not mean what its author thinks. Shared by `issuers[].capturedClaims`
+ * and the top-level `identityProjectionClaims`, which have the identical rule.
+ */
+function assertNoDuplicateClaimNames(field: string) {
+  return (claims: readonly string[] | undefined, ctx: z.RefinementCtx): void => {
+    if (!claims) return;
+    const seen = new Set<string>();
+    claims.forEach((name, i) => {
+      if (seen.has(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [i],
+          message: `${field} repeats '${name}' — each claim name may appear only once`,
+        });
+      }
+      seen.add(name);
+    });
+  };
+}
+
 // A trusted third-party IdP issuer, registered in the blueprint's BOOTSTRAP-token
 // phase — alongside app-context/service-principal creation, NOT folded into the
 // in-context load with schemas/accessProfile/roles. Tenant-wide provisioning
@@ -754,6 +1128,46 @@ const BlueprintIssuerSchema = z
           .strict(),
       )
       .optional(),
+    /**
+     * Opt-in ADDITIONAL identity-claim capture: OIDC claim names — beyond `emailClaim`, which keeps
+     * its own dedicated field — read from this issuer's tokens on every successful token exchange
+     * and stored as your tenant's golden IdP-asserted identity copy for the signed-in user.
+     *
+     * Deliberately NOT a fixed set: name whatever claims your IdP actually asserts (standard ones
+     * like `name`/`phone_number`, or your provider's own custom claims). Each name is read from the
+     * verified token first, falling back to `userinfoUri` (when configured) only for names still
+     * missing after that — so a claim your IdP puts only on the userinfo response still resolves,
+     * provided you configured that endpoint.
+     *
+     * Omit entirely to capture nothing beyond email (the default, and the behaviour of every
+     * registration authored before this field existed). Capped at 20 entries, each a non-blank name
+     * of at most 64 characters; a duplicate is REJECTED rather than silently deduplicated, because a
+     * repeated name is a sign the declaration does not mean what its author thinks.
+     *
+     * Pairs with the top-level `identityProjectionClaims`, which decides which of these captured
+     * names are then projected onto access profiles in this context — capture and projection are
+     * separate opt-ins, and capturing a claim does not by itself expose it on a profile.
+     */
+    capturedClaims: z
+      .array(
+        z
+          .string()
+          .max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
+            message: `a capturedClaims entry must be at most ${MAX_CAPTURED_CLAIM_NAME_LENGTH} characters`,
+          })
+          // `.min(1)` is a LENGTH check and would admit a whitespace-only name while the message
+          // claims "non-blank"; the platform rejects on isBlank(). Note the value is REJECTED, not
+          // trimmed — it reaches the wire exactly as authored, matching how the platform stores it.
+          // Ordered after `.max` because `.refine` returns a ZodEffects, which has no `.max`.
+          .refine((name) => name.trim().length > 0, {
+            message: 'a capturedClaims entry must be a non-blank OIDC claim name',
+          }),
+      )
+      .max(MAX_CAPTURED_CLAIMS, {
+        message: `capturedClaims accepts at most ${MAX_CAPTURED_CLAIMS} entries`,
+      })
+      .optional()
+      .superRefine(assertNoDuplicateClaimNames('capturedClaims')),
   })
   .strict();
 
@@ -1117,24 +1531,80 @@ const BlueprintSeedRecordSchema = z.discriminatedUnion('surface', [
 // `}}` (never crossing a literal `}`), so a token this lint's narrower form
 // couldn't parse is still DETECTED here rather than silently invisible —
 // landing as a dead, unresolved literal wherever it was misplaced.
-const SELF_TOKEN_RE = /\$\{\{\s*(?:self|under|member)\.[^}]*?\s*\}\}/;
+// 'input' joins the alternation: `${{ input.* }}` is a fourth runtime placeholder family, resolved
+// against the record that fired a trigger rather than the caller's own identity. Sharing this regex
+// means it inherits the SAME placement confinement (and the same generic "not recognized here"
+// rejection in contexts like `roleAssumable`, where an input-fired-record concept is meaningless)
+// without a second, parallel token-detection regex to keep in sync.
+const SELF_TOKEN_RE = /\$\{\{\s*(?:self|under|member|input)\.[^}]*?\s*\}\}/;
+
+// The IDENTITY-DERIVED families (`self.*`, `under.self.*`, `member.*`) — everything in
+// SELF_TOKEN_RE's alternation EXCEPT `input`. Detected separately so they can be rejected inside
+// `triggers[].dataScope`, where they are the exact inverse of `input.*`: legal-looking, and resolved
+// against the WRONG principal.
+//
+// A trigger's grant is resolved at fire time against the TRIGGER PRINCIPAL's identity, not the
+// author's. So `${{ self.scope.org }}` in a trigger dataScope does not mean "my org" — it means "the
+// trigger principal's org", which the platform cannot verify the author has any reach into. The
+// platform refuses it (`TriggerRuleHandler#rejectIdentityDerivedPlaceholders`); this lint reports it
+// offline, at validate/plan, instead of letting an apply fail partway through a provisioning run.
+//
+// Use `${{ input.* }}` to confine a trigger's grant to the record that fired it, or name literals.
+const IDENTITY_DERIVED_TOKEN_RE = /\$\{\{\s*(?:self|under|member)\.[^}]*?\s*\}\}/;
+
+// `${{ input.* }}` alone, detected separately so it can be rejected in a subtree where
+// `self`/`under`/`member` are fine but `input` specifically is not (`input.*` resolves against a
+// firing record, which exists ONLY on a trigger's own dataScope clause — everywhere else it is
+// inert, matching nothing forever). Sharing SELF_TOKEN_RE's broad "anything to the closing `}}`"
+// capture style so a malformed `input.*` token is still DETECTED, not silently missed.
+const INPUT_TOKEN_RE = /\$\{\{\s*input\.[^}]*?\s*\}\}/;
 
 function lintSelfTokenPlacement(value: unknown, ctx: z.RefinementCtx): void {
-  const walk = (node: unknown, path: (string | number)[], inRoleDataScope: boolean): void => {
+  // 'none': no self-family placeholder is valid here at all.
+  // 'self-family': self/under/member are valid (roles[].dataScope, roleAssumable[], fragments[]) —
+  //   `input.*` is NOT, because none of these clauses ever see a firing record.
+  // 'trigger': triggers[].dataScope — the one subtree where `input.*` is valid, and the ONLY one
+  //   where the identity-derived families (self/under/member) are NOT: everywhere else they resolve
+  //   against the caller, here they would resolve against the trigger's own principal.
+  type PlacementZone = 'none' | 'self-family' | 'trigger';
+  const walk = (node: unknown, path: (string | number)[], zone: PlacementZone): void => {
     if (typeof node === 'string') {
-      if (!inRoleDataScope && SELF_TOKEN_RE.test(node)) {
+      if (zone === 'none' && SELF_TOKEN_RE.test(node)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path,
           message:
-            "'${{ self.* }}' / '${{ member.* }}' is a runtime placeholder — it is only valid inside a " +
-            "roles[].dataScope value, a roleAssumable[] value, or a fragments[] value",
+            "'${{ self.* }}' / '${{ member.* }}' / '${{ input.* }}' is a runtime placeholder — it is " +
+            "only valid inside a roles[].dataScope value, a roleAssumable[] value, a fragments[] " +
+            "value, or a triggers[].dataScope value ('${{ input.* }}' specifically is valid ONLY in " +
+            "triggers[].dataScope)",
+        });
+      } else if (zone === 'trigger' && IDENTITY_DERIVED_TOKEN_RE.test(node)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            "'${{ self.* }}' / '${{ under.self.* }}' / '${{ member.* }}' resolve against the TRIGGER " +
+            "PRINCIPAL's identity, not yours \u2014 a trigger's grant is resolved at fire time under its own " +
+            "principal. The platform refuses them in a trigger grant for that reason: the reach they " +
+            "describe is not bounded by your own. Use '${{ input.* }}' to confine the grant to the " +
+            'record that fired the rule, or name literal values.',
+        });
+      } else if (zone === 'self-family' && INPUT_TOKEN_RE.test(node)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            "'${{ input.* }}' resolves against the record that fired a trigger — it is only valid " +
+            "inside a triggers[].dataScope value. It is inert (never resolved, matches nothing) in " +
+            "roles[].dataScope, roleAssumable[], and fragments[] values; use '${{ self.* }}' / " +
+            "'${{ under.self.* }}' / '${{ member.* }}' there instead.",
         });
       }
       return;
     }
     if (Array.isArray(node)) {
-      node.forEach((v, i) => walk(v, [...path, i], inRoleDataScope));
+      node.forEach((v, i) => walk(v, [...path, i], zone));
       return;
     }
     if (node && typeof node === 'object') {
@@ -1144,19 +1614,29 @@ function lintSelfTokenPlacement(value: unknown, ctx: z.RefinementCtx): void {
         const inRoleDataScopeClause =
           path.length === 3 && path[0] === 'roles' && k === 'dataScope';
         // `roleAssumable.<roleId>` — the whole subtree under the
-        // top-level 'roleAssumable' key is a grant map; `inRoleDataScope`'s
-        // stickiness (`entering = inRoleDataScope || ...`) then covers every
-        // value under it, same mechanism `fragments` uses below.
+        // top-level 'roleAssumable' key is a grant map; the zone's
+        // stickiness (`nextZone` below) then covers every value under it,
+        // same mechanism `fragments` uses below.
         const inRoleAssumable = path.length === 0 && k === 'roleAssumable';
         // `fragments.<name>` — the whole subtree under the top-level
         // 'fragments' key is a dataScope map, same reasoning.
         const inFragments = path.length === 0 && k === 'fragments';
-        const entering = inRoleDataScope || inRoleDataScopeClause || inRoleAssumable || inFragments;
-        walk(v, [...path, k], entering);
+        // `triggers.<name>.dataScope` (path === ['triggers', <name>], key 'dataScope') is the
+        // trigger analogue of `inRoleDataScopeClause` — the one subtree where `${{ input.* }}` is
+        // meaningful, since only a trigger's own grant clause has a firing record to resolve it
+        // against.
+        const inTriggerDataScope = path.length === 2 && path[0] === 'triggers' && k === 'dataScope';
+        const nextZone: PlacementZone =
+          zone === 'trigger' || inTriggerDataScope
+            ? 'trigger'
+            : zone === 'self-family' || inRoleDataScopeClause || inRoleAssumable || inFragments
+              ? 'self-family'
+              : 'none';
+        walk(v, [...path, k], nextZone);
       }
     }
   };
-  walk(value, [], false);
+  walk(value, [], 'none');
 }
 
 // Every `${{ identities.<name> }}` reference must point at a declared identity in
@@ -1467,11 +1947,79 @@ function lintDataScopeKey(key: string, path: (string | number)[], ctx: z.Refinem
   }
 }
 
+/**
+ * Platform-owned search-index metadata keys, per BIND SURFACE. A schema-declared `filterable: true`
+ * field whose `fieldId` collides with one for a surface the schema binds to would shadow the
+ * platform's own value in the index — silently costing recall and precision on type-scoped searches
+ * — so the platform rejects it with a `400`.
+ *
+ * Transcribed from `RecordSchemaDB.RECORD_INDEXABLE_METADATA_RESERVED_FIELD_NAMES` and its document
+ * sibling. Three things here are deliberate and must not be "simplified":
+ *
+ * - **The two sets stay SEPARATE, and a schema is checked against only the surface(s) it declares.**
+ *   Checking the UNION rejects a real, shipping document-only blueprint over `recordType`, a key the
+ *   document model never writes. That regression is on the record platform-side; do not reintroduce
+ *   it here.
+ * - **`status` is on NEITHER set.** Documents always kept lifecycle on their own `lifecycleStatus`
+ *   field, and records stopped publishing a lifecycle `status` key, so a filterable `status` field is
+ *   now legitimate on both surfaces. The bundled agentic-sdlc blueprints rely on exactly this.
+ * - **An identity-only schema (`user`/`entity`) reserves NOTHING.** Identity models are not indexed
+ *   through the indexable-metadata path at all, so there is no platform map to collide with.
+ *
+ * A non-filterable field of any name is unaffected — it never reaches the index metadata map.
+ */
+const RECORD_RESERVED_FILTERABLE_FIELD_IDS: ReadonlySet<string> = new Set([
+  'tenantId', 'owner_id', 'folderId', 'rootFolderId', 'recordType',
+]);
+const DOCUMENT_RESERVED_FILTERABLE_FIELD_IDS: ReadonlySet<string> = new Set([
+  'tenantId', 'model_type', 'owner_id', 'title', 'folderId', 'rootFolderId', 'recordType',
+]);
+
+/**
+ * Reject a `filterable: true` field whose id is a platform-owned index key for a surface this schema
+ * binds to. Reported at authoring time so `blueprint validate`/`plan` catches it, rather than the
+ * apply failing partway through provisioning — the same "lints clean, then 400s at apply" class this
+ * package's other placement lints exist to close.
+ *
+ * `allowedSurfaces` defaults to `['record']` when omitted, matching what the CLI loader actually
+ * sends; reading an omitted value as "no surfaces" would silently skip the check for the single most
+ * common blueprint shape.
+ */
+function lintReservedFilterableFieldIds(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as { schemas?: Array<{ typeName?: string; allowedSurfaces?: string[];
+    fields?: Array<{ fieldId?: string; filterable?: boolean }> }> };
+  bp.schemas?.forEach((schema, si) => {
+    const surfaces = schema.allowedSurfaces ?? ['record'];
+    schema.fields?.forEach((field, fi) => {
+      if (!field?.filterable || !field.fieldId) return;
+      const collidesWith = new Set<string>();
+      if (surfaces.includes('record') && RECORD_RESERVED_FILTERABLE_FIELD_IDS.has(field.fieldId)) {
+        for (const k of RECORD_RESERVED_FILTERABLE_FIELD_IDS) collidesWith.add(k);
+      }
+      if (surfaces.includes('document') && DOCUMENT_RESERVED_FILTERABLE_FIELD_IDS.has(field.fieldId)) {
+        for (const k of DOCUMENT_RESERVED_FILTERABLE_FIELD_IDS) collidesWith.add(k);
+      }
+      if (collidesWith.size === 0) return;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schemas', si, 'fields', fi, 'filterable'],
+        message:
+          `schema '${schema.typeName ?? si}': field '${field.fieldId}' cannot be declared filterable — ` +
+          `'${field.fieldId}' is a platform-owned search-index metadata key ` +
+          `(${[...collidesWith].sort().join(', ')}) for a surface this schema binds to ` +
+          `(${surfaces.join(', ')}), and a filterable payload field of the same name would shadow it ` +
+          `in the index. Choose a different fieldId, or leave this field non-filterable.`,
+      });
+    });
+  });
+}
+
 function lintDataScopeKeys(value: unknown, ctx: z.RefinementCtx): void {
   const bp = value as {
     accessProfile?: { dataScope?: Record<string, unknown> };
     roles?: Record<string, Array<{ dataScope?: Record<string, unknown> }>>;
     fragments?: Record<string, Record<string, unknown>>;
+    triggers?: Record<string, { dataScope?: Record<string, unknown> }>;
   };
   for (const key of Object.keys(bp.accessProfile?.dataScope ?? {})) {
     lintDataScopeKey(key, ['accessProfile', 'dataScope', key], ctx);
@@ -1488,6 +2036,12 @@ function lintDataScopeKeys(value: unknown, ctx: z.RefinementCtx): void {
   for (const [name, fragment] of Object.entries(bp.fragments ?? {})) {
     for (const key of Object.keys(fragment ?? {})) {
       lintDataScopeKey(key, ['fragments', name, key], ctx);
+    }
+  }
+  // A trigger's inline dataScope follows the identical key grammar.
+  for (const [name, trigger] of Object.entries(bp.triggers ?? {})) {
+    for (const key of Object.keys(trigger.dataScope ?? {})) {
+      lintDataScopeKey(key, ['triggers', name, 'dataScope', key], ctx);
     }
   }
 }
@@ -1675,6 +2229,308 @@ function lintAccessProfileRoleIds(value: unknown, ctx: z.RefinementCtx): void {
     }
     seen.add(roleId);
   });
+}
+
+/**
+ * Every entry in a trigger's `fields` must name a field the firing schema keeps INLINE — declared
+ * `inline: true`, or `filterable`, or used as a lookup field — and never one marked `sensitive`.
+ * The platform rejects anything else with a 400 listing the projectable fields.
+ *
+ * Checked here because the blueprint declares BOTH halves: the schema and the rule that projects
+ * from it. That is the same "lints clean, then 400s partway through an apply" class every other
+ * lint in this file exists to close, and it is worse for triggers than most — the apply has already
+ * created a service principal and a profile by the time the trigger create is attempted.
+ *
+ * Deliberately silent when the schema is not resolvable from this blueprint: an unknown
+ * `schemaName` already has its own issue from `lintTriggers`, and piling a second, derived
+ * complaint on top of it just obscures the real one.
+ */
+function lintTriggerFields(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    schemas?: Array<{
+      typeName?: string;
+      fields?: Array<{ fieldId?: string; inline?: boolean; filterable?: boolean; sensitive?: boolean }>;
+      lookupFields?: Array<string | { fieldName?: string; fieldNames?: string[]; sortBy?: string }>;
+    }>;
+    triggers?: Record<string, { firingSource?: { schemaName?: string }; fields?: string[] }>;
+  };
+  for (const [triggerName, entry] of Object.entries(bp.triggers ?? {})) {
+    const declared = entry?.fields;
+    if (!declared?.length) continue; // [] is the valid "project nothing" declaration
+    const schema = bp.schemas?.find((sc) => sc.typeName === entry.firingSource?.schemaName);
+    if (!schema) continue; // lintTriggers already reports the unknown schemaName
+
+    // Everything a LOOKUP makes projectable. Transcribed from the platform's own
+    // getInlineProjectionFieldNames(), which adds three things — and the third is easy to miss:
+    //   - a bare-string lookup's name;
+    //   - every leg of an object lookup, composite included;
+    //   - the lookup's `sortBy` TARGET, unless it is the built-in createdAt/lastUpdated. A sortBy
+    //     target need not itself be inline, filterable, or a leg, so this is a fourth projectable
+    //     path that reading the field-level flags alone will not find.
+    const lookupNames = new Set<string>();
+    for (const lf of schema.lookupFields ?? []) {
+      if (typeof lf === 'string') {
+        lookupNames.add(lf);
+        continue;
+      }
+      if (lf?.fieldName) lookupNames.add(lf.fieldName);
+      for (const n of lf?.fieldNames ?? []) lookupNames.add(n);
+      if (lf?.sortBy && lf.sortBy !== 'createdAt' && lf.sortBy !== 'lastUpdated') {
+        lookupNames.add(lf.sortBy);
+      }
+    }
+
+    // The platform rejects a repeated entry outright; every sibling list in this file (roleIds,
+    // manifest) already checks this, and leaving it out here would let the exact "lints clean, 400s
+    // partway through the apply" case this lint exists to close straight through.
+    const seenFields = new Set<string>();
+
+    declared.forEach((fieldId, i) => {
+      const def = schema.fields?.find((f) => f.fieldId === fieldId);
+      const path = ['triggers', triggerName, 'fields', i];
+      if (seenFields.has(fieldId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `triggers['${triggerName}'].fields names '${fieldId}' more than once — list it once`,
+        });
+        return;
+      }
+      seenFields.add(fieldId);
+      // SENSITIVE FIRST, before the lookup shortcut below. The platform subtracts sensitive from
+      // the WHOLE projectable set — lookup legs included — and a sensitive lookup field is a
+      // supported, blind-indexed shape, so returning early on `lookupNames` would wave through a
+      // combination that 400s at createTrigger, AFTER the apply has already minted the trigger's
+      // service principal and placeholder profile. That is exactly the expensive failure this lint
+      // exists to move earlier.
+      if (def?.sensitive === true) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            `triggers['${triggerName}'].fields names '${fieldId}', which is marked 'sensitive'. A ` +
+            'sensitive field is blind-indexed and masked, and can never be projected into a trigger ' +
+            "script — drop it from 'fields', or make the field non-sensitive",
+        });
+        return;
+      }
+      // A lookup leg (or sortBy target) is projectable REGARDLESS of whether a FieldDef exists for
+      // it: `fields` on a schema is optional, and the platform requires a declaration only for a
+      // sortBy target. Checked BEFORE the not-declared branch, which would otherwise reject a
+      // perfectly legal lookup-only schema.
+      if (lookupNames.has(fieldId)) return;
+      if (!def) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            `triggers['${triggerName}'].fields names '${fieldId}', which schema ` +
+            `'${schema.typeName}' neither declares nor uses as a lookup`,
+        });
+        return;
+      }
+      if (def.inline !== true && def.filterable !== true) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            `triggers['${triggerName}'].fields names '${fieldId}', which schema '${schema.typeName}' ` +
+            "does not keep inline. A rule may project only a field that is 'inline: true', " +
+            "'filterable: true', or used as a lookup field — mark it 'inline: true' on the schema, " +
+            "or drop it from 'fields'",
+        });
+      }
+    });
+  }
+}
+
+/**
+ * Authoring-time checks for the `scripts` block — the two things a `z.record` value schema cannot
+ * reach on its own.
+ *
+ * 1. **The map KEY is the script's name**, and `z.record`'s value schema never sees it, so the
+ *    platform's name grammar has to be checked here or not at all. Unchecked, a bad name is a 400
+ *    partway through an apply that has already created a service principal and an access profile.
+ *
+ * 2. **A trigger naming a script THIS blueprint ships must use `version: 'latest'`.** A pinned
+ *    integer means "run a version this bundle does not define": the platform assigns version
+ *    numbers itself, so an author cannot know which number their `source` will land on, and the
+ *    pin they wrote is at best a guess about the target context's history. The trap is what
+ *    happens NEXT — edit `source`, the push mints version 2, and the rule pinned to `1` goes on
+ *    running the OLD code with nothing to observe. Shipping the script and pinning away from it
+ *    are contradictory intents, so this refuses rather than warns (this package has no warning
+ *    channel, and a restriction is cheap to relax later and breaking to add later).
+ *
+ * A `scriptRef` naming a script this blueprint does NOT ship stays entirely unrestricted, pin and
+ * all — that is the pre-existing "reference a script someone else pushed" case, and it is the only
+ * form that worked before this block existed.
+ */
+function lintScripts(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    scripts?: Record<string, unknown>;
+    // `version` is NOT optional here, matching `BlueprintTriggerScriptRefSchema`'s own
+    // `z.string().min(1)`. Typing it optional invited a `version === undefined` guard below that
+    // could never fire — and a dead guard reads to the next person as though the case is reachable.
+    // A nested parse failure aborts before this top-level refinement runs, so by the time we are
+    // here every `scriptRef` present has a `version`.
+    triggers?: Record<string, { scriptRef?: { name?: string; version: string } }>;
+  };
+  const scripts = bp.scripts;
+  if (!scripts) return;
+
+  for (const name of Object.keys(scripts)) {
+    if (!SCRIPT_NAME_RE.test(name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['scripts', name],
+        message:
+          `scripts['${name}'] is not a valid script name — use 1-64 characters of letters, digits, ` +
+          "underscores ('_') and hyphens ('-'). The map key IS the name the platform stores and a " +
+          "trigger's scriptRef.name resolves against.",
+      });
+    }
+  }
+
+  for (const [triggerName, trigger] of Object.entries(bp.triggers ?? {})) {
+    const ref = trigger?.scriptRef;
+    if (!ref?.name) continue;
+    // Only constrains a reference to a script THIS blueprint ships, keyed on the declared key SET
+    // rather than on name validity. So a blueprint that both misnames a script and pins it reports
+    // BOTH issues — deliberately, because they are independent: correcting the name does not
+    // correct the pin, and suppressing the second would hide a fix the author still owes.
+    if (!Object.prototype.hasOwnProperty.call(scripts, ref.name)) continue;
+    if (ref.version !== 'latest') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['triggers', triggerName, 'scriptRef', 'version'],
+        message:
+          `triggers['${triggerName}'].scriptRef pins version '${ref.version}' of '${ref.name}', ` +
+          "which is a script THIS blueprint ships — use version: 'latest' instead. Version numbers " +
+          'are assigned by the platform, so a pin cannot be known to name the source declared here; ' +
+          'and once that source is edited the pin would keep running the superseded version. Pin a ' +
+          'version only for a script this blueprint does not ship.',
+      });
+    }
+  }
+}
+
+/**
+ * Authoring-time checks for the `triggers` block, mirroring `lintAccessProfileRoleIds`'s two shapes
+ * (name resolution + no-duplicates) for the two references a trigger entry can carry:
+ * - `firingSource.schemaName` must name a `typeName` this SAME blueprint declares in `schemas`
+ *   (the identical same-blueprint self-reference `lintSeedSurfaces` already relies on for
+ *   `seed[].typeName`).
+ * - `roleIds` (when the entry is role-composed) must each name a role this SAME blueprint declares
+ *   in `roles` — byte-for-byte the same check `lintAccessProfileRoleIds` runs for
+ *   `accessProfile.roleIds`, just walked once per trigger entry instead of once for the singular
+ *   service-principal profile.
+ */
+function lintTriggers(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    schemas?: Array<{ typeName?: string; capabilities?: { triggersEnabled?: boolean } }>;
+    roles?: Record<string, Array<{ dataScope?: Record<string, unknown> }>>;
+    triggers?: Record<string, { firingSource?: { schemaName?: string }; roleIds?: string[] }>;
+  };
+  const triggers = bp.triggers;
+  if (!triggers) return;
+
+  const declaredSchemas = new Set((bp.schemas ?? []).map((s) => s.typeName).filter(Boolean));
+  // Schemas that have opted in to firing triggers. A trigger may only name a schema THIS blueprint
+  // declares (checked below), so this set is exact — there is no "declared elsewhere, can't tell"
+  // case to fall through on.
+  const triggerEnabledSchemas = new Set(
+    (bp.schemas ?? [])
+      .filter((s) => s.capabilities?.triggersEnabled === true)
+      .map((s) => s.typeName)
+      .filter(Boolean),
+  );
+  const declaredRoles = new Set(Object.keys(bp.roles ?? {}));
+
+  for (const [name, trigger] of Object.entries(triggers)) {
+    const schemaName = trigger.firingSource?.schemaName;
+    if (schemaName && !declaredSchemas.has(schemaName)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['triggers', name, 'firingSource', 'schemaName'],
+        message:
+          `triggers['${name}'].firingSource.schemaName names '${schemaName}', which is not a schema ` +
+          `this blueprint declares in schemas — ` +
+          (declaredSchemas.size ? `declared schemas: ${[...declaredSchemas].join(', ')}` : 'declared schemas: (none)'),
+      });
+    } else if (schemaName && !triggerEnabledSchemas.has(schemaName)) {
+      // Records only fire triggers when their schema opts in, so a rule against a schema that has
+      // not would be created, hold a service principal and a grant, and never fire — a state that
+      // reads as working. Caught here at plan time, and refused again by the platform on apply.
+      // Reported only when the schema RESOLVES, so an author fixing a typo'd schemaName sees one
+      // clear error rather than two describing the same mistake.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['triggers', name, 'firingSource', 'schemaName'],
+        message:
+          `triggers['${name}'].firingSource.schemaName names '${schemaName}', which does not enable ` +
+          `triggers — records of that schema would never fire it. Set ` +
+          `capabilities.triggersEnabled: true on the '${schemaName}' schema.`,
+      });
+    }
+
+    const roleIds = trigger.roleIds;
+    if (!roleIds) continue;
+    const seen = new Set<string>();
+    roleIds.forEach((roleId, i) => {
+      const path: (string | number)[] = ['triggers', name, 'roleIds', i];
+      if (!declaredRoles.has(roleId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            `triggers['${name}'].roleIds names '${roleId}', which is not a role this blueprint ` +
+            `declares in roles — ` +
+            (declaredRoles.size ? `declared roles: ${[...declaredRoles].join(', ')}` : 'declared roles: (none)'),
+        });
+      }
+      if (seen.has(roleId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `triggers['${name}'].roleIds names '${roleId}' more than once — remove the duplicate`,
+        });
+      }
+      seen.add(roleId);
+
+      // The COMPOSED leg of the identity-derived refusal. lintSelfTokenPlacement walks the blueprint
+      // by SUBTREE, so it sees a trigger's own inline `dataScope` (zone 'trigger') but never the
+      // dataScope of a role the trigger merely NAMES — that role sits under `roles`, in the
+      // 'self-family' zone, where self/under/member are correct and must stay legal for its ordinary
+      // use as an access-profile grant.
+      //
+      // The platform gate is not subtree-shaped: TriggerRuleHandler#rejectIdentityDerivedPlaceholders
+      // runs on BOTH the inline-scopes leg and the roleIds leg, because the escalation is in what the
+      // grant RESOLVES to at fire time and a composed role carries a clause exactly as an inline one
+      // does. Without this, a blueprint composing a role whose dataScope carries
+      // `${{ self.scope.org }}` lints clean and then 400s partway through applying it — the
+      // failure this lint exists to prevent, and the same "one leg over" miss that produced the
+      // platform finding in the first place.
+      for (const clause of bp.roles?.[roleId] ?? []) {
+        for (const [dim, raw] of Object.entries(clause?.dataScope ?? {})) {
+          for (const v of Array.isArray(raw) ? raw : [raw]) {
+            if (typeof v !== 'string' || !IDENTITY_DERIVED_TOKEN_RE.test(v)) continue;
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path,
+              message:
+                `triggers['${name}'].roleIds names '${roleId}', whose dataScope['${dim}'] uses '${v}'. ` +
+                "'${{ self.* }}' / '${{ under.self.* }}' / '${{ member.* }}' resolve against the " +
+                'TRIGGER PRINCIPAL\'s identity, not yours, so the platform refuses them in a trigger ' +
+                `grant — inline or composed. The role itself is fine for ordinary use; it just cannot ` +
+                'be the grant for a trigger. Give the trigger an inline grant using ' +
+                "'${{ input.* }}' or literal values, or compose a role without an identity-derived " +
+                'dataScope.',
+            });
+          }
+        }
+      }
+    });
+  }
 }
 
 function lintRoleAssumable(value: unknown, ctx: z.RefinementCtx): void {
@@ -1928,6 +2784,20 @@ export const BLUEPRINT_FIELD_PHASES: Readonly<Record<string, LoaderPhase>> = Obj
   accessProfile: 'in-context',
   roles: 'in-context',
   seed: 'in-context',
+  // Pushed on the same in-context token as the schemas/roles above, and — load-bearing — BEFORE
+  // `triggers`, because a trigger's `scriptRef` is validated AT DECLARE TIME: a rule naming a script
+  // with no versions in the context is refused with a 400. This map does not order the loader (a
+  // plain object's key order is not a contract); the loader orders itself, and a test pins it.
+  scripts: 'in-context',
+  // A trigger's principal + grant are provisioned exactly like the roles: block is (N service-
+  // principal/AccessProfile pairs instead of one), so it applies in the identical in-context phase,
+  // under the same re-minted context-confined token.
+  triggers: 'in-context',
+  // Setting it requires the platform provisioning capability, which only the bootstrap credential
+  // carries — the same reasoning as issuers/namespaces above. It is applied to the app context
+  // itself, which the bootstrap phase already creates, so there is nothing for the in-context pass
+  // to do with it.
+  identityProjectionClaims: 'bootstrap',
 });
 
 export const BlueprintSchema = z
@@ -1994,6 +2864,77 @@ export const BlueprintSchema = z
      * already exist). `org`/`client` need no entry — they exist already.
      */
     namespaces: z.array(BlueprintNamespaceSchema).optional(),
+    /**
+     * Declares which of the golden IdP-asserted claim names captured by this tenant's issuers (see
+     * `issuers[].capturedClaims`) are projected, read-only, onto access profiles in THIS context.
+     * Applied to the app context in the BOOTSTRAP-token phase, alongside the context's own create.
+     *
+     * Capture and projection are deliberately separate opt-ins: capturing a claim stores it against
+     * the user, projecting it exposes it on a profile in this context. Declaring a name here that no
+     * issuer captures is not an error — it simply never fills.
+     *
+     * <p><b>Fills once, then freezes.</b> A profile's projection is written the first time a sign-in
+     * for that principal can supply a value — usually at profile creation, but for an INVITED member
+     * not until they actually accept and sign in, since there is nothing to project before that.
+     * Once filled it never updates again, even if this declaration or the underlying identity data
+     * changes later. So editing this list affects only profiles that have not been filled yet; it is
+     * not a backfill, and re-applying a blueprint does not re-project existing profiles.
+     *
+     * <p><b>Authority.</b> Setting this needs the platform provisioning capability — the same
+     * authority the bootstrap credential already uses to register issuers and declare namespaces.
+     * An ordinary `app-contexts:u` credential may rename its own context but may not opt it into
+     * projecting IdP-golden identity data, so this field is only settable on the bootstrap phase's
+     * own token, never on the per-context wildcard the in-context load runs under.
+     *
+     * <p>Omit to leave the context's existing declaration unchanged; declare an empty list to
+     * disable future projection. Capped at 20 entries, each a non-blank name of at most 64
+     * characters, duplicates rejected — the same bounds `capturedClaims` carries.
+     *
+     * <p><b>Applies only when this blueprint CREATES the app context.</b> The condition is the
+     * context being created, not the apply being the first one: creating the context separately
+     * beforehand means even the first apply does not set it. Re-applying against a context that
+     * already exists does not change it, in either direction. Edit the declaration on an existing context through the platform API instead. (A
+     * tool applying this blueprint could in principle reconcile it, but doing so also overwrites the
+     * context's name and needs a broader scope — see `@vectros-ai/cli`'s own notes.)
+     */
+    identityProjectionClaims: z
+      .array(
+        z
+          .string()
+          .max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
+            message: `an identityProjectionClaims entry must be at most ${MAX_CAPTURED_CLAIM_NAME_LENGTH} characters`,
+          })
+          // Same non-blank rule (and same ordering constraint) as `capturedClaims` above.
+          .refine((name) => name.trim().length > 0, {
+            message: 'an identityProjectionClaims entry must be a non-blank claim name',
+          }),
+      )
+      .max(MAX_CAPTURED_CLAIMS, {
+        message: `identityProjectionClaims accepts at most ${MAX_CAPTURED_CLAIMS} entries`,
+      })
+      .optional()
+      .superRefine(assertNoDuplicateClaimNames('identityProjectionClaims')),
+    /**
+     * Optional scripts this blueprint SHIPS: scriptName -> `{ source, declaredInputContract? }`.
+     *
+     * Distinct from a trigger's `scriptRef`, which only NAMES a script and requires it to already
+     * exist. Pushed BEFORE the `triggers` block, because a `scriptRef` is validated at declare time.
+     *
+     * Each entry is the CURRENT SOURCE for that name, not a version — the platform assigns versions
+     * itself and they are immutable. Re-applying an unchanged blueprint pushes nothing; editing
+     * `source` pushes a new version, which every `version: 'latest'` rule then picks up.
+     */
+    scripts: BlueprintScriptsSchema.optional(),
+    /**
+     * Optional async trigger rules: triggerName -> declaration.
+     *
+     * These FIRE. A record write on a schema that opts in via `capabilities.triggersEnabled`
+     * dispatches the rule's script, which runs asynchronously in a sandbox under the grant declared
+     * here — so a trigger's `allowedActions`/`dataScope`/`capabilities` (or the roles its `roleIds`
+     * composes) are live authority, not a declaration awaiting a future release. Author the grant as
+     * narrowly as you would any other credential's.
+     */
+    triggers: BlueprintTriggersSchema.optional(),
   })
   .strict()
   .superRefine((bp, ctx) => {
@@ -2002,6 +2943,7 @@ export const BlueprintSchema = z
     lintIdentityOverrides(bp, ctx);
     lintNamespacedScopeArrays(bp, ctx);
     lintDataScopeKeys(bp, ctx);
+    lintReservedFilterableFieldIds(bp, ctx);
     lintExpectedScopeDims(bp, ctx);
     lintDataScopeRefs(bp, ctx);
     lintRoleAssumable(bp, ctx);
@@ -2010,6 +2952,9 @@ export const BlueprintSchema = z
     lintIdentitySurfaces(bp, ctx);
     lintIssuerContext(bp, ctx);
     lintNamespaces(bp, ctx);
+    lintTriggers(bp, ctx);
+    lintTriggerFields(bp, ctx);
+    lintScripts(bp, ctx);
   });
 
 export type Blueprint = z.infer<typeof BlueprintSchema>;
@@ -2032,6 +2977,14 @@ export type BlueprintIssuer = z.infer<typeof BlueprintIssuerSchema>;
 export type BlueprintNamespace = z.infer<typeof BlueprintNamespaceSchema>;
 export type BlueprintRoleClause = z.infer<typeof BlueprintRoleClauseSchema>;
 export type BlueprintRoles = z.infer<typeof BlueprintRolesSchema>;
+/** A single trigger declaration — the value type of `triggers[triggerName]`. */
+export type BlueprintTriggerEntry = z.infer<typeof BlueprintTriggerEntrySchema>;
+/** The top-level `triggers` map. */
+export type BlueprintTriggers = z.infer<typeof BlueprintTriggersSchema>;
+/** A single shipped-script declaration — the value type of `scripts[scriptName]`. */
+export type BlueprintScriptEntry = z.infer<typeof BlueprintScriptEntrySchema>;
+/** The top-level `scripts` map: scriptName -> declaration. */
+export type BlueprintScripts = z.infer<typeof BlueprintScriptsSchema>;
 /** A named, reusable `dataScope` map, referenced via a clause's `dataScopeRef`. */
 export type BlueprintFragments = z.infer<typeof BlueprintFragmentsSchema>;
 /** One role's `POST /v1/auth/token/assume` entitlement grant — the value type of `roleAssumable[roleId]`. */

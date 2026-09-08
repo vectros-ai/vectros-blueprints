@@ -30,6 +30,8 @@ export {
   type BlueprintIssue,
   type BlueprintIssuer,
   type BlueprintNamespace,
+  type BlueprintScriptEntry,
+  type BlueprintScripts,
   type LoaderPhase,
   BLUEPRINT_FIELD_PHASES,
 } from './types.js';

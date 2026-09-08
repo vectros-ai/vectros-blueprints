@@ -3,6 +3,138 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.18.0 — 2026-09-07
+
+### Added
+
+- **A `scripts` block — a blueprint can now ship the source its trigger runs.** A map of script
+  name → `{ source, declaredInputContract? }`, so a blueprint that declares a trigger can carry the
+  code that trigger runs. A `scriptRef` is validated when the rule is DECLARED rather than when it
+  fires — a rule naming a script with no versions in the target context is refused outright — so
+  `scripts` is applied before the triggers that reference it.
+
+  `source` is required, non-blank and capped at 300,000 UTF-8 bytes; `declaredInputContract` is
+  optional, capped at 50,000, and descriptive only — nothing validates a firing against it. Both
+  caps are counted in UTF-8 BYTES to match the platform, so a source full of multi-byte characters
+  cannot slip past by being short in characters. Nothing parses the source, here or on the platform:
+  a syntax error stays invisible until the version first runs.
+
+  **The source is inline and there is no `path:`.** A shipped script runs under its trigger's
+  declared grant, so it is live authority, and a blueprint is a bundle someone reviews before
+  applying — keeping the source inside the bundle keeps what runs inside what was reviewed. It also
+  keeps this package filesystem-free, which it has to be.
+
+  **A version is not declarable, and a trigger naming a script this blueprint ships must use
+  `version: latest`** — rejected at authoring time otherwise. Versions are assigned by the platform
+  and a stored version is immutable, so a blueprint declares only the current source for a name; a
+  pin would name a version the blueprint cannot know it produced, and once the source is edited that
+  rule would go on running the superseded version with nothing to indicate it. A `scriptRef` naming
+  a script the blueprint does NOT ship is unrestricted and may still pin, which is the existing
+  "reference a script someone else pushed" case and keeps working unchanged.
+
+  The map key is the script name and carries the platform's grammar (1–64 characters of letters,
+  digits, `_`, `-`), checked at authoring rather than failing partway through an apply. `scripts` is
+  applied in-context, and before the triggers that reference it.
+
+- **`triggers[].fields`** — the record fields a rule projects into its script's
+  `input.record`, and on an `UPDATE` firing into `input.previous`. `fields: []` is the "project
+  nothing" declaration; the script still receives `input.recordId`. Required rather than defaulted
+  so that projecting nothing is something an author states. An entry may name only a field the
+  schema keeps inline — `inline: true`, `filterable: true`, or a lookup field (a leg or its `sortBy`
+  target) — and never one marked `sensitive`; `parseBlueprint` checks that against the schema in the same blueprint rather than
+  leaving it to fail partway through an apply. Note a rule declaring any `fields` must also hold a
+  `records:r` clause covering the firing schema's type, without a literal `data_scope` constraint.
+
+- **`schemas[].fields[].inline`** — keep a field on the record row when the payload is stored out of
+  line, so it appears in list and lookup projections without `includePayload`, and so a trigger rule
+  may project it. Rejected alongside `sensitive`: a sensitive field is blind-indexed and masked, so
+  a readable row copy would defeat it.
+
+- **A `filterable: true` field whose id is a platform-owned search-index key is now rejected at
+  authoring time.** Such a field shadows the platform's own value in the index, silently costing
+  recall and precision on type-scoped searches, and the platform now refuses it — so a blueprint
+  declaring one FAILS TO APPLY. `parseBlueprint` reports it at validate/plan instead. The reserved
+  set is per bind surface and is checked against only the surface(s) a schema declares, never the
+  union: `tenantId`/`owner_id`/`folderId`/`rootFolderId`/`recordType` for a schema allowing
+  `record`, plus `model_type`/`title` for one allowing `document`. A schema binding only to
+  `entity` reserves nothing, and a non-filterable field of any name is unaffected. `status` is
+  reserved on neither surface and remains available as a filterable field.
+
+- **`assignableRoles` on a role clause and on an `accessProfile` inline clause** — a roleId
+  allow-list restricting WHICH named roles that clause may compose into a delegated AccessProfile
+  (`roleIds` composition). Orthogonal to `allowedActions`/`dataScope`: it narrows which roles the
+  clause's authority may hand out, not how much data it reaches. Omitting it means no restriction,
+  which is how every existing blueprint keeps behaving; an EMPTY list is rejected rather than read as
+  "compose nothing", because an empty list states no rule. Capped at 20 entries, each matching the
+  platform's roleId grammar, duplicates rejected. Entries are deliberately not resolved against this
+  blueprint's own `roles` — a clause may legitimately name a role that already exists in the context.
+  Rejected on a `roleIds`-composed `accessProfile`, which has no inline clause to carry it, matching
+  the carve-out `dataScope` and `capabilities` already have.
+
+  **Adoption note:** once a clause carries `assignableRoles`, it can compose only the roles the list
+  names — so name every roleId the restricted clause still needs BEFORE adding the field, not after.
+
+- **`issuers[].capturedClaims`** — a list of additional OIDC claim names, beyond `emailClaim`, to
+  capture from that issuer's tokens on every successful token exchange and store as your tenant's
+  golden identity-provider-asserted copy for the signed-in user. Not a fixed set: name whatever
+  claims your provider actually asserts. Each is read from the verified token first, falling back to
+  `userinfoUri` (when configured) only for names still missing after that. Omit entirely to capture
+  nothing beyond email — unchanged behaviour for every existing blueprint. Capped at 20 entries of at
+  most 64 characters each, and a duplicate is rejected rather than deduplicated.
+
+- **`identityProjectionClaims`** — a new, optional top-level list declaring which of the captured
+  claim names above are projected, read-only, onto access profiles in this blueprint's app context.
+  Applied in the BOOTSTRAP phase, alongside the context create — setting it needs the platform
+  provisioning capability, which only the bootstrap credential carries, so it could not be applied
+  in-context. Capture and projection are separate opt-ins: capturing a claim stores it against the
+  user, projecting it exposes it on a profile. A profile's projection fills once, the first time a
+  sign-in for that principal can supply a value, and never updates again — so editing this list
+  affects only profiles not yet filled, and re-applying a blueprint does not re-project existing
+  ones. Omit to leave the context's declaration unchanged; declare an empty list to disable future
+  projection. Same bounds as `capturedClaims`. Note that the declaration applies when the app context
+  is CREATED — re-applying a blueprint against an existing context does not change it.
+
+- **`triggers`** — a new, optional top-level block declaring rules that invoke a versioned script on
+  a schema record's `CREATE`/`UPDATE`/`DELETE` event. The rule fires: a matching record write runs the
+  script asynchronously under an explicitly declared grant, the same least-privilege posture as
+  `roles`/`accessProfile`. Each entry declares:
+  - `firingSource` — the schema (by its blueprint `typeName`) and event that fires the rule.
+  - `scriptRef` — the script name and an exact version, or the literal `"latest"` to float to
+    whatever version is current at fire time.
+  - A grant — `roleIds` (composed from `roles`) **or** an inline `allowedActions`/`dataScope` pair,
+    mutually exclusive, mirroring `accessProfile`'s own XOR shape exactly.
+  - `manifest` — an optional list narrowing which host-object verbs the script may call, further
+    restricting whatever the grant would otherwise permit (never widening it).
+
+  The schema a trigger fires on must opt in with `capabilities.triggersEnabled: true`. Records only
+  fire triggers when their schema declares it, so a rule against a schema without it would be
+  created, hold a service principal and a grant, and silently never fire — `parseBlueprint` rejects
+  that shape, and the platform rejects it again on apply. It defaults to `false` and is independent
+  of `capabilities.auditHistory`: turning audit history off does not turn triggers off.
+
+- **`${{ self.* }}` / `${{ under.self.* }}` / `${{ member.* }}` are REJECTED inside a
+  `triggers[<name>].dataScope` value, and in the `dataScope` of any role a trigger composes via
+  `roleIds`** (they remain valid in `roles[].dataScope`, `roleAssumable[]` and `fragments[]` for every
+  OTHER use — what is refused is being a trigger's grant, not the value itself). A trigger's grant is resolved at fire time against the TRIGGER PRINCIPAL's
+  identity, not the author's, so `${{ self.scope.org }}` there does not mean "my org" — it means "the
+  trigger principal's org", reach the author is never checked to hold. The platform refuses it; this
+  lint reports it at validate/plan instead of letting an apply fail partway through provisioning. Use
+  `${{ input.* }}` to confine a trigger's grant to the record that fired it, or name literal values.
+
+- **`schemas[].capabilities.triggersEnabled`** — the opt-in above, declarable on any schema.
+- **`${{ input.* }}`** — a new `dataScope` value-source placeholder, valid **only** inside a
+  `triggers[<name>].dataScope` value (rejected everywhere else `roles`/`accessProfile` accept a
+  placeholder). Resolves to a dimension stamped on the record whose change fired the trigger — the
+  same "confine authority to the acting record's own identity" pattern `${{ self.* }}` already gives
+  the calling principal, one level removed.
+- Structural lint coverage for the new block: `firingSource.schemaName` must name a schema this
+  blueprint actually declares; `roleIds` must name roles this blueprint actually declares and may not
+  repeat one; `scriptRef.version` must be a positive integer or `"latest"`.
+- `triggers` is the one block an apply reconciles by ABSENCE: removing an entry de-provisions the
+  trigger (its rule and access profile), where removing a `schemas` or `roles` entry leaves the
+  resource in place. See the `triggers` section of the README for the full rule,
+  including which triggers are out of an apply's reach entirely.
+
 ## 0.17.0 — 2026-08-27
 
 ### Added
