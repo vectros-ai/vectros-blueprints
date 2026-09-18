@@ -340,7 +340,10 @@ each naming a schema event that invokes a versioned script under an explicitly d
 under the grant declared here — so a trigger's `allowedActions`/`dataScope`/`capabilities`, or the
 roles its `roleIds` composes, are live authority. Author the grant as narrowly as you would any
 other credential's, and review it the same way. Applied per-context like `roles`/`accessProfile`,
-not in the bootstrap phase. Each entry:
+not in the bootstrap phase. A grant naming a control-plane resource (`keys`, `profiles`, `users`,
+`app-contexts`, `access-log`, `scripts`, any op) or the bare wildcard `*` additionally requires the
+applying credential to hold the `trigger-control-plane-grant` capability — no bundled blueprint
+declares one, and this is refused by default. Each entry:
 
 ```yaml
 schemas:
@@ -433,16 +436,32 @@ use by something this blueprint cannot see.
 
 **Removing a script does NOT de-provision it** — the deliberate counterpoint to the paragraph above,
 and the asymmetry to remember. Drop an entry from `scripts` and re-apply, and every stored version
-stays. A script row carries no record of which blueprint pushed it, so an apply cannot tell one it
-created from one you pushed by hand, and a wrong delete would be unrecoverable — the stored source is
-the only copy — and would break any trigger still referencing it. An unreferenced script version is
-inert, so leaving it costs storage and nothing else. Remove one deliberately with
-`vectros scripts delete`, after `vectros scripts list` shows you what a context holds.
+stays. Each version does carry a record of which blueprint pushed it (used to gate PUSHING a new
+version onto an existing name — see the next paragraph), but there is no second, principal-shaped
+factor to pair that marker with the way a trigger row has one, so deleting on it alone would still be
+unrecoverable — the stored source is the only copy. The platform refuses (`409`) to delete a version
+still referenced by a live trigger rule — directly, by a pinned `scriptRef`, or via `"latest"` when the
+version being deleted is the current newest of its name — so re-point or remove the trigger first. An
+unreferenced script version is inert, so leaving it costs storage and nothing else. Remove one
+deliberately with `vectros scripts delete`, after `vectros scripts list` shows you what a context
+holds.
+
+**Pushing onto a name you don't already own is refused.** Before superseding a script name that
+already has a version, the loader checks who pushed the current one: a name already marked for a
+*different* blueprint is refused outright (push under a different name instead); a name with no
+marker at all (hand-authored, or pushed before this marker existed) is refused unless the operator
+re-runs with `--allow-script-adoption` — a flag only a human running `bootstrap` can supply, never
+something a blueprint can declare for itself. A blueprint that already owns a name (or is pushing it
+for the first time) needs neither. Adoption itself is subject to the platform's own authorization on
+top of this flag: an account owner can adopt any unmarked name, but one Dev Portal team member cannot
+adopt a name a *different* team member hand-pushed — see the CLI's own `AUTHORING.md` for the full
+mechanism.
 
 A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
-audience, contextId, subClaim?, emailClaim?, userinfoUri?, selfSignupPolicies?, capturedClaims? }`.
-Unlike `schemas`/`accessProfile`/
+audience, contextId, subClaim?, emailClaim?, userinfoUri?, restrictedToDomain?, selfSignupPolicies?, capturedClaims? }`.
+`jwksUri` and, when set, `userinfoUri` must be `https://` URLs — the platform rejects an `http://` value
+at apply time. A tenant is capped at 50 registered issuers. Unlike `schemas`/`accessProfile`/
 `roles` (applied under a per-context token), issuers are applied in the loader's
 **bootstrap-token phase**, alongside app-context/service-principal creation —
 tenant-wide provisioning config that needs the bootstrap credential's owner-only

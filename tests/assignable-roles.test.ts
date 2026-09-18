@@ -4,8 +4,8 @@
  * Orthogonal to `allowedActions`/`dataScope`: it narrows which roles the clause's authority may hand
  * out, not how much data it reaches.
  *
- * Structural validation only, transcribed from the platform's `ScopeClause.validateAssignableRoles`
- * and `RoleDB.ROLE_ID_PATTERN`. Entries are deliberately NOT resolved against this blueprint's own
+ * Structural validation only, transcribed from the platform's own role-id validation. Entries are
+ * deliberately NOT resolved against this blueprint's own
  * `roles` block — a clause may legitimately name a roleId that already exists in the context, so
  * only the format is knowable offline.
  */

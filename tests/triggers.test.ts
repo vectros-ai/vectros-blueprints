@@ -233,8 +233,8 @@ test('triggers: ACCEPTS ${{ input.scope.org }} inside a trigger entry dataScope'
 // A trigger's grant is resolved at fire time against the TRIGGER PRINCIPAL's identity, not the
 // author's, and nothing checks the author has authority over that principal. So the identity-derived
 // families mean something different here than they do anywhere else they are legal, and the platform
-// refuses them (TriggerRuleHandler#rejectIdentityDerivedPlaceholders). These three cases pin that this
-// lint agrees with the platform: an earlier revision ACCEPTED `${{ self.scope.org }}` here, on the
+// refuses them. These three cases pin that this lint agrees with the platform: an earlier
+// revision ACCEPTED `${{ self.scope.org }}` here, on the
 // reasoning that "both value sources are legal there" \u2014 true of the grammar, false of the semantics.
 test('triggers: REJECTS ${{ self.scope.org }} inside a trigger entry dataScope (resolves against the trigger principal, not the author)', () => {
   const paths = issuePaths(
@@ -352,7 +352,7 @@ test('triggers: REJECTS ${{ input.* }} outside triggers[].dataScope (e.g. access
  * did not distinguish `input` from that group), even though it is inert everywhere except
  * `triggers[].dataScope` — an author would get no error and a role that reads zero rows forever.
  * `accessProfile.dataScope` (the test above) was already caught by the generic "not valid here"
- * branch (zone 'none'); this pins the specific self-family zone the PM's finding named.
+ * branch (zone 'none'); this pins the specific self-family zone that gap named.
  */
 test('triggers: REJECTS ${{ input.* }} inside roles[].dataScope — inert there, valid only in triggers[].dataScope', () => {
   const paths = issuePaths(
@@ -630,7 +630,7 @@ test('fields: a BUILT-IN sortBy does not make an arbitrary field projectable', (
 });
 
 test('fields: REJECTS a duplicate entry, as the platform does', () => {
-  // TriggerRuleDB rejects "declared more than once"; every sibling list here (roleIds, manifest)
+  // The platform rejects "declared more than once"; every sibling list here (roleIds, manifest)
   // already checks it, so omitting it left the exact lints-clean-then-400s case open.
   const paths = issuePaths(minimal({
     schemas: [{ typeName: 'intake', displayName: 'Intake',

@@ -55,7 +55,7 @@ test('fragments: dataScopeRef never survives parseBlueprint — the wire only ev
   assert.equal('dataScopeRef' in (bp.roles?.r[0] as object), false);
 });
 
-test('fragments: the SAME fragment referenced from several clauses expands independently (the casework.blueprint.yaml motivating case)', () => {
+test('fragments: the SAME fragment referenced from several clauses expands independently (the multi-clause-role motivating case)', () => {
   const bp = parseBlueprint(
     minimal({
       fragments: { ownOrg: { 'scope:org': ['${{ self.scope.org }}'] } },

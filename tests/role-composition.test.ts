@@ -1,7 +1,7 @@
 /**
  * Additive role composition at the AccessProfile: an
  * `accessProfile.roleIds` reference (plural) as an alternative to an inline
- * `allowedActions` clause. Mirrors `AccessProfileDB`'s `roleId` → `roleIds`
+ * `allowedActions` clause. Mirrors the platform's own `roleId` → `roleIds`
  * shape at the authoring layer.
  */
 import { test } from 'node:test';

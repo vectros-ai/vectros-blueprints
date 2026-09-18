@@ -22,6 +22,165 @@ import { z } from 'zod';
 const CONTEXT_ID_RE = /^[a-z][a-z0-9-]{2,30}$/;
 
 /**
+ * Characters that would corrupt or FORGE a line in a rendered, human-reviewed context, or
+ * hide/misrepresent text within one via an invisible or reordering character.
+ * `vectros bootstrap`'s pre-apply plan preview (`@vectros-ai/cli`'s `buildPlan`/`renderPlan`)
+ * interpolates blueprint-authored free text directly into single printed lines, and an
+ * operator approves a real mint based on reading them. A string containing a raw newline/CR,
+ * a Unicode line/paragraph separator, an ANSI escape (also a C0 control — `\x1b` is the
+ * escape-sequence lead-in), a bidi-override/isolate character, an invisible/zero-width
+ * character, or a bidi MARK (which reorders neutral characters around it, even without a
+ * full override) can forge an extra fake line, hide or reorder adjacent text, or otherwise
+ * make the rendered preview show something other than what will actually be minted —
+ * defeating the review the preview exists to provide.
+ *
+ * Rejected AT PARSE TIME (`safeDisplayString` below), rather than sanitized at each render
+ * site: a per-site strip-and-continue means every NEW field added to a future preview (or any
+ * other rendered surface) is a new forgery surface, guarded only by whoever remembers to
+ * sanitize it there. A schema-level reject closes it once, for every current and future sink,
+ * and fails loudly on a hostile blueprint instead of quietly rendering a cleaned-up version of
+ * one — an operator who approves a plan is trusting that the schema already made this
+ * impossible, not that every renderer downstream remembered to defend against it.
+ *
+ *   C0 controls + DEL:         \x00-\x1f, \x7f (incl. \n, \r, \t, \x1b — the ANSI escape lead-in)
+ *   C1 controls:               \x80-\x9f
+ *   Soft hyphen:               U+00AD
+ *   Arabic Letter Mark:        U+061C
+ *   Zero-width + BOM:          U+200B-U+200D (ZWSP/ZWNJ/ZWJ), U+2060 (word joiner), U+FEFF
+ *   Bidi MARKS (reorder only): U+200E, U+200F (LRM/RLM)
+ *   Line/paragraph separators: U+2028, U+2029
+ *   Bidi control characters:   U+202A-U+202E (embed/override), U+2066-U+2069 (isolate)
+ *   Unicode tag characters:    U+E0000-U+E007F (render invisibly; two distinct byte sequences
+ *                              can look identical on screen)
+ *
+ * ⚠️ WHAT THIS DOES **NOT** CLOSE — state plainly, not implied by omission:
+ *
+ *   1. LENGTH is not bounded here at all (no `.max`). A very long value pushes real content
+ *      off-screen in a rendered line, the same practical spoofing effect as a forged line —
+ *      see `@vectros-ai/cli`'s `loader.ts` `sanitizeForPlanDisplay`, which caps length as a
+ *      render-site concern this schema layer does not attempt.
+ *   2. HOMOGLYPHS are not closed for a general free-text field by any blocklist — Unicode's
+ *      confusable-character space (Cyrillic/Greek/Latin look-alikes, etc.) is far larger than
+ *      any enumerable list, so a field like `name`/`contextName`/`fieldId` can still be
+ *      authored to visually resemble different text than it is. The three URL-shaped fields
+ *      below (`issuer`/`jwksUri`/`userinfoUri`) close this for THEMSELVES via a different,
+ *      positive mechanism (`safeUrlString`) — printable-ASCII-only plus a parsed-URL check —
+ *      because a URL host is exactly the place a homoglyph is weaponized (a domain an operator
+ *      reads and trusts). That mechanism does not generalize to prose/identifier fields, which
+ *      have no equivalent "must be ASCII" constraint a legitimate author could always satisfy.
+ */
+const FORGERY_CHARS_RE =
+  /[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
+
+/**
+ * Wrap a `z.string()` schema — AFTER any shape constraints (`.min`/`.max`/etc.) are already
+ * applied, never before: `.refine()` returns a `ZodEffects`, which drops `ZodString`'s own
+ * chainable methods, so this must be the LAST call in the chain (matching every other
+ * `.refine()` use in this file). For any field a rendered, human-reviewed surface (today:
+ * the CLI's plan preview; potentially others later) may interpolate into a single line — see
+ * `FORGERY_CHARS_RE`'s own doc for why this lives at the schema, not at each renderer, AND for
+ * what it does and does NOT close (length; homoglyphs on a non-URL field). For a field whose
+ * value is itself a URL (`issuer`/`jwksUri`/`userinfoUri`), use `safeUrlString` below instead —
+ * it closes the homoglyph class for those three specifically, which this function cannot.
+ *
+ * ⚠️ UNSUITABLE for any field authored as a YAML block scalar (`>` folded or `|` literal) — the
+ * idiom every multi-line prose field naturally reaches for. YAML's default (clip) chomping
+ * always leaves exactly ONE trailing `\n` on the parsed value, which `FORGERY_CHARS_RE` rejects
+ * as a C0 control indistinguishable from an embedded forgery newline. `description`-shaped
+ * fields (a schema's, a field's, a script's `declaredInputContract`/`source`, …) are exactly
+ * this class — a real multi-line blueprint description authored this way broke this validator
+ * (the top-level `description`) before the wrap was removed from that field. A "just strip a
+ * trailing newline first" fix is NOT safe in general:
+ * this wrapper is a schema-level primitive with no visibility into where its value ends up
+ * rendered — a trailing newline is harmless only when the value is the LAST thing on its own
+ * rendered line, which is true for some call sites here (a bare `description` step) but not
+ * others (e.g. `contextName`, immediately followed by `${projection}` and a closing paren on
+ * the SAME rendered line — a trailing newline THERE forges exactly the mid-line break this
+ * wrapper exists to prevent). Before wrapping a NEW field with this function, either confirm it
+ * is never authored as a block scalar, or don't — do not add a trailing-newline exception here
+ * to make it fit.
+ */
+function safeDisplayString<T extends z.ZodString>(base: T) {
+  return base.refine((v) => !FORGERY_CHARS_RE.test(v), {
+    message:
+      'must not contain control characters, invisible/zero-width characters, line/paragraph ' +
+      'separators, or bidi marks/overrides — these can forge, hide, or reorder text in a ' +
+      'rendered plan preview',
+  });
+}
+
+/**
+ * A tighter, POSITIVE check for a field whose value must itself be a URL a human reads and
+ * trusts (today: an issuer's `issuer`/`jwksUri`/`userinfoUri` — the trust-anchor fields the
+ * plan preview exists to disclose). Requires the ENTIRE raw string to be printable ASCII
+ * (`\x20`-`\x7e`), to start with `https://` (case-insensitive; `http:` is NOT accepted — see
+ * below), and its AUTHORITY (the substring between `://` and the first `/`, `?`, or `#`) to
+ * match `[A-Za-z0-9.-]+(:\d+)?` — letters, digits, dot, dash, and an optional numeric port.
+ *
+ * WHY A GRAMMAR ON THE AUTHORITY, NOT A CALL TO `new URL()` FOLLOWED BY MORE CHECKS: an earlier
+ * version of this function parsed the value with `new URL()` and checked the RESULT — that
+ * approach has two bypasses `new URL()` itself creates, both closed by never calling it at all:
+ *
+ *   1. HOMOGLYPH-VIA-PERCENT-ENCODING: `new URL()` percent-DECODES the authority as part of
+ *      parsing, then IDNA/punycode-normalizes the decoded host. So `https://%D0%B0pple.example/`
+ *      (percent-encoded Cyrillic 'а') decodes to the same Cyrillic host `new URL()` would also
+ *      punycode-encode from a literal Cyrillic character — the parsed `.hostname` is ASCII
+ *      either way, and an ASCII-only check on it cannot tell "the author wrote punycode
+ *      deliberately" from "IDNA produced punycode from a homoglyph the percent-encoding hid."
+ *      The authority grammar here rejects `%` outright, so the encoded form never reaches a
+ *      decoder in the first place.
+ *   2. USERINFO PHISHING: `https://jwks.trusted-idp.example@evil.example/keys` parses to
+ *      `.hostname === 'evil.example'` with `.username === 'jwks.trusted-idp.example'` — but the
+ *      RAW STRING an operator reads in the rendered plan shows the trusted-looking prefix
+ *      immediately after `jwksUri:`, before the `@`, which is exactly where a human eye stops
+ *      reading a URL as "the domain." A `.hostname`-only check never inspects that raw string
+ *      shape at all. The authority grammar rejects `@` outright, so userinfo syntax can't appear.
+ *
+ * This closes the HOMOGLYPH class `safeDisplayString`/`FORGERY_CHARS_RE` cannot: a Unicode
+ * look-alike host (e.g. a Cyrillic 'а' in place of Latin 'a') is invisible to any character
+ * BLOCKLIST — no enumerable list of "forgery characters" contains an ordinary-looking letter
+ * from a different script. This POSITIVE grammar closes it instead: an author who needs a
+ * genuine internationalized domain must supply its already-punycode (`xn--…`) ASCII form, which
+ * is what every real IdP presents on the wire — and with percent-encoding and userinfo excluded
+ * by the grammar, what the operator reads in the rendered plan IS the actual authority, `xn--`
+ * prefix included, restoring the property this field's disclosure was meant to have.
+ *
+ * `https:` ONLY, not `http:`: the platform hard-refuses a non-`https` issuer/jwksUri/userinfoUri
+ * at registration, so accepting `http:` here would repeat this package's own established anti-
+ * pattern — a blueprint that lints clean and then 400s at apply — for a field this exact
+ * function exists to catch problems in before that point. `@vectros-ai/cli`'s own tests pin
+ * an `http://` value being rejected, so this choice is a tested decision, not an implicit one.
+ *
+ * RESIDUALS — named, not chased: a trailing-dot host (`good.example.`) still passes (cosmetic,
+ * not a homoglyph risk); a bare IPv4 literal (`192.0.2.1`) still passes (a platform-side fetch
+ * concern this preview isn't positioned to evaluate, not a display-forgery one); a bracketed
+ * IPv6 literal (`[::1]`) is REJECTED as a side effect of excluding `[`/`]`/extra `:` from the
+ * authority grammar (an IdP is never realistically IPv6-literal-addressed in practice, so this
+ * is an acceptable false-reject, not a gap worth widening the grammar for).
+ *
+ * LENGTH is still not bounded here (see `FORGERY_CHARS_RE`'s own doc on that axis, which
+ * applies here too) — this function closes the homoglyph and forgery-character classes for
+ * these three fields specifically, and nothing else.
+ */
+function safeUrlString<T extends z.ZodString>(base: T) {
+  return base.refine(
+    (v) => {
+      if (!/^[\x20-\x7e]*$/.test(v)) return false;
+      const authorityMatch = /^https:\/\/([^/?#]*)/i.exec(v);
+      if (!authorityMatch) return false;
+      return /^[A-Za-z0-9.-]+(:\d+)?$/.test(authorityMatch[1]);
+    },
+    {
+      message:
+        'must be a printable-ASCII https:// URL whose authority is only letters, digits, dot, ' +
+        "dash, and an optional port — no userinfo ('@'), percent-encoding, or non-ASCII host " +
+        '(including a look-alike/homoglyph domain) is accepted; supply an internationalized ' +
+        'domain in its punycode (xn--…) form',
+    },
+  );
+}
+
+/**
  * Maximum distinct ownership-scope dimensions a record can carry — the
  * platform's own two-scope-pair capacity. ONE constant for every place that
  * number is spelled — the schema-level `.max()` caps below AND
@@ -74,7 +233,7 @@ const RenderHintsSchema = z
 
 const BlueprintFieldDefSchema = z
   .object({
-    fieldId: z.string().min(1),
+    fieldId: safeDisplayString(z.string().min(1)),
     fieldType: z.string().min(1),
     required: z.boolean().optional(),
     searchable: z.boolean().optional(),
@@ -187,15 +346,19 @@ const BlueprintFieldDefSchema = z
 // index, an exact-match sort key, an opt-in past the fast-index budget, or —
 // the composite (conjunctive) form — several fields matched together at once.
 // The loader normalizes all three to the partner-API `LookupDef` shape ([SV5]).
+// safeDisplayString on every string leaf below: a schema's `lookupFields` renders raw into
+// `buildPlan`'s schema-step summary line (the `lookupNote`, alongside `fieldId`'s
+// sensitive-fields note on that same line) — a gap found after the rest of this file's
+// forgery-character pass had already shipped.
 const BlueprintLookupFieldSchema = z.union([
-  z.string().min(1),
+  safeDisplayString(z.string().min(1)),
   z
     .object({
       // A lookup field declares either ONE field (fieldName) or 2-3 fields
       // matched together (fieldNames) — never both, never neither. `.strict()`
       // below only rejects unknown KEYS; it does not enforce this combination,
       // so the `.superRefine()` after it carries the actual rule.
-      fieldName: z.string().min(1).optional(),
+      fieldName: safeDisplayString(z.string().min(1)).optional(),
       // Composite (conjunctive) lookup: match on all of these fields at once —
       // "every record where `status` is `open` AND `area` is `billing`", exact,
       // in a stable order. Order is significant and locked at create: a query
@@ -204,7 +367,7 @@ const BlueprintLookupFieldSchema = z.union([
       // lookup for that. Record-only: the schema's `allowedSurfaces` must be
       // exactly `['record']` (checked at the schema level below) — the
       // platform's composite index has no document/user/entity reader yet.
-      fieldNames: z.array(z.string().min(1)).min(2).max(3).optional(),
+      fieldNames: z.array(safeDisplayString(z.string().min(1))).min(2).max(3).optional(),
       // Not available on a composite (`fieldNames`) lookup — checked below.
       unique: z.boolean().optional(),
       // Opt this field into ordered range + prefix lookups (from/to/prefix) on
@@ -281,7 +444,14 @@ const BlueprintCapabilitiesSchema = z
 
 const BlueprintSchemaSchema = z
   .object({
-    typeName: z.string().min(1),
+    // safeDisplayString: buildPlan's schema step renders this raw into a single summary
+    // line (`schema '${s.typeName}' (...)`) — a gap found after the rest of this file's
+    // forgery-character pass had already shipped, the same "unconstrained free-text field
+    // reaches a rendered plan line" shape as issuer/allowedActions/etc. `displayName`
+    // here is NOT wrapped: unlike
+    // servicePrincipal's own displayName, this one is never interpolated into a rendered
+    // summary anywhere in loader.ts today (only forwarded to the schema-upsert payload).
+    typeName: safeDisplayString(z.string().min(1)),
     displayName: z.string().min(1),
     description: z.string().optional(),
     // Default search-index mode for instances of this type. HYBRID, SEMANTIC and
@@ -445,8 +615,8 @@ const GrantedCapabilitiesSchema = z
  * `allowedActions`/`dataScope`: it narrows which roles this clause's authority may hand out, not how
  * much data it reaches.
  *
- * Bounds transcribed from the platform's `ScopeClause.validateAssignableRoles` +
- * `RoleDB.ROLE_ID_PATTERN`. Three rules that are easy to get wrong, all deliberate platform-side:
+ * Bounds transcribed from the platform's own role-id validation. Three rules that are easy to
+ * get wrong, all deliberate platform-side:
  *
  * - **Absent means UNRESTRICTED** (default-open), matching `data_scope`'s own posture. A tenant opts
  *   INTO the restriction by adding the field.
@@ -503,7 +673,7 @@ const BlueprintAccessProfileSchema = z
     // `.superRefine` on this schema enforces the XOR, mirroring the platform's
     // own access-profile scopes/role-composition XOR check). Exactly one of
     // the two authors this profile's grant.
-    allowedActions: z.array(z.string().min(1)).min(1).optional(),
+    allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1).optional(),
     // Additive role composition: this profile's effective grant is
     // each named role's own clauses, concatenated in the order listed, instead of
     // an inline clause authored here. Every id must name a role this SAME
@@ -532,7 +702,14 @@ const BlueprintAccessProfileSchema = z
     // NOT see tenant-level/seed records). Every KEY is validated below
     // (`lintDataScopeKeys`) — `userId` or a grammar-valid `scope:<ns>`, no
     // other shape.
-    dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    // safeDisplayString on the value: not currently rendered by VALUE anywhere in buildPlan
+    // (only `Object.keys(...)` of a profile's dataScope is shown today, unlike a role clause's
+    // dataScope, which `renderPlanDataScope` prints values for — the reason that sibling field
+    // WAS wrapped). Wrapped anyway for consistency with every other dataScope-shaped field in
+    // this file, and so a future preview enhancement that starts showing these values (a very
+    // plausible one, given the existing renderPlanDataScope precedent) doesn't silently reopen
+    // this exact class on a field that looks, byte-for-byte, like every other one already closed.
+    dataScope: z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
     // Optional identity overrides for the service principal's profile — scope
     // values its key STAMPS onto everything it writes (a credential can only
     // stamp ownership its identity carries). Keys are the namespaced `scope:<ns>`
@@ -647,9 +824,9 @@ const BlueprintAccessProfileSchema = z
 //
 // `dataScopeRef` is AUTHORING-ONLY sugar: name a
 // top-level `fragments.<name>` entry instead of repeating an identical
-// `dataScope` map verbatim across several clauses (the exact shape
-// `casework.blueprint.yaml`'s `case_handler` role hit — four clauses
-// repeating `scope:org: ['${{ self.scope.org }}']`). Mutually exclusive with
+// `dataScope` map verbatim across several clauses (the exact shape a role with
+// several similarly-scoped clauses hits — e.g. four clauses all repeating
+// `scope:org: ['${{ self.scope.org }}']`). Mutually exclusive with
 // `dataScope` on the SAME clause (this schema's own `.superRefine` below) — never
 // both, and expanded to a literal `dataScope` (the ref itself never survives)
 // by {@link expandDataScopeRefs} before `parseBlueprint` returns, so nothing
@@ -658,8 +835,8 @@ const BlueprintAccessProfileSchema = z
 // checks the name resolves against a declared `fragments` entry.
 const BlueprintRoleClauseSchema = z
   .object({
-    allowedActions: z.array(z.string().min(1)).min(1),
-    dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1),
+    dataScope: z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
     dataScopeRef: z.string().min(1).optional(),
     capabilities: GrantedCapabilitiesSchema,
     assignableRoles: AssignableRolesSchema,
@@ -685,7 +862,7 @@ const BlueprintRoleClauseSchema = z
 // provisioned resource (absent from `BLUEPRINT_FIELD_PHASES`), and does not
 // survive `parseBlueprint` as a live reference — only as expanded literals.
 const BlueprintFragmentsSchema = z.record(
-  z.record(z.array(z.union([z.string().min(1), z.null()]))),
+  z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))),
 );
 
 // Optional top-level `roles`: a map of roleId → ordered clauses. Authored in the
@@ -693,7 +870,15 @@ const BlueprintFragmentsSchema = z.record(
 // DISTINCT from `accessProfile` (the least-privilege scope the bootstrap mints
 // for the blueprint's own service-principal key). Roles are identity-agnostic,
 // reusable, multi-clause rules (architecture §6).
-const BlueprintRolesSchema = z.record(z.array(BlueprintRoleClauseSchema).min(1));
+//
+// The KEY (roleId) is safeDisplayString'd via the two-argument `z.record(keySchema,
+// valueSchema)` form: `buildPlan`'s role step renders roleId raw (`role '${roleId}' (...)`),
+// and every OTHER string leaf in this file got
+// the forgery-character guard via `safeDisplayString` wrapping a VALUE; a map KEY is the one
+// shape that pattern doesn't reach, since `safeDisplayString` wraps a `ZodString`, not a
+// `ZodRecord`'s key type. `z.record`'s two-arg form takes exactly that: a key schema, validated
+// the same way a value would be, reporting the key itself in `.path`.
+const BlueprintRolesSchema = z.record(safeDisplayString(z.string().min(1)), z.array(BlueprintRoleClauseSchema).min(1));
 
 // A role-level `assumable` grant map: the
 // `POST /v1/auth/token/assume` entitlement the platform's role create/update
@@ -705,7 +890,7 @@ const BlueprintRolesSchema = z.record(z.array(BlueprintRoleClauseSchema).min(1))
 // `dataScope`, where it is the one non-namespaced key allowed — and no value
 // may be `null` (assumable has no tenant-level/owner-less reading to opt
 // into; `/assume` always requests one concrete value).
-const BlueprintRoleAssumableSchema = z.record(z.array(z.string().min(1)).min(1));
+const BlueprintRoleAssumableSchema = z.record(z.array(safeDisplayString(z.string().min(1))).min(1));
 
 // `roleAssumable` is a SEPARATE top-level map (roleId →
 // grant), not a field folded into a `roles[roleId]` entry. Deliberate: a
@@ -743,7 +928,12 @@ const BlueprintTriggerFiringSourceSchema = z
 const SCRIPT_VERSION_INTEGER_RE = /^[1-9][0-9]*$/;
 const BlueprintTriggerScriptRefSchema = z
   .object({
-    name: z.string().min(1),
+    // safeDisplayString: rendered raw into buildPlan's trigger step (`${scriptRef.name}@...`).
+    // When naming a script THIS blueprint ships, `name` is transitively safe already (it must
+    // equal a `scripts` map key, itself grammar-pinned by SCRIPT_NAME_RE) — but a scriptRef
+    // naming a script this blueprint does NOT ship is, by design, "entirely unrestricted" (see
+    // this file's own doc on that case), so the wrap is load-bearing for exactly that path.
+    name: safeDisplayString(z.string().min(1)),
     version: z.string().min(1),
   })
   .strict()
@@ -788,9 +978,9 @@ const BlueprintTriggerEntrySchema = z
   .object({
     firingSource: BlueprintTriggerFiringSourceSchema,
     scriptRef: BlueprintTriggerScriptRefSchema,
-    allowedActions: z.array(z.string().min(1)).min(1).optional(),
+    allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1).optional(),
     roleIds: z.array(z.string().min(1)).min(1).optional(),
-    dataScope: z.record(z.array(z.union([z.string().min(1), z.null()]))).optional(),
+    dataScope: z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
     capabilities: GrantedCapabilitiesSchema,
     manifest: BlueprintTriggerManifestSchema,
     /**
@@ -814,7 +1004,7 @@ const BlueprintTriggerEntrySchema = z
      * together are capped at 224 KB serialised — a firing whose projected input exceeds that is not
      * run, and is recorded as an `INPUT_TOO_LARGE` failure naming the size.
      */
-    fields: z.array(z.string().min(1)),
+    fields: z.array(safeDisplayString(z.string().min(1))),
   })
   .strict()
   .superRefine((entry, ctx) => {
@@ -863,7 +1053,12 @@ const BlueprintTriggerEntrySchema = z
 // like `BlueprintRolesSchema` above (a top-level record keyed by name), but each VALUE is a single
 // declaration object, not a clause array — a trigger has exactly one firing rule, not a list of
 // alternative ones.
-const BlueprintTriggersSchema = z.record(BlueprintTriggerEntrySchema);
+//
+// The KEY (triggerName) is safeDisplayString'd for the same reason `BlueprintRolesSchema`'s
+// roleId key is, just above: `buildPlan`'s trigger steps render it raw (`trigger '${triggerName}'
+// ...`), AND it is concatenated into a synthesized principal name sent to the platform
+// (`${blueprint.name}-trigger-${triggerName}`) — a second, non-display reason this key must be clean.
+const BlueprintTriggersSchema = z.record(safeDisplayString(z.string().min(1)), BlueprintTriggerEntrySchema);
 
 // ---------------------------------------------------------------------------
 // `scripts` — the source a blueprint SHIPS, as opposed to the `scriptRef` a
@@ -975,8 +1170,15 @@ const IdentityKindSchema = z.string().min(1).superRefine((val, ctx) => {
 const IdentityDeclSchema = z
   .object({
     kind: IdentityKindSchema,
-    externalId: z.string().min(1),
-    displayName: z.string().min(1).optional(),
+    // safeDisplayString: `@vectros-ai/cli`'s `runBootstrapCli` and `blueprint plan` both print
+    // this RAW to stdout ("~ <name> (<kind>) — external id '<externalId>'"), immediately before
+    // the "Apply this plan? [y/N]" confirmation gate itself — the highest-severity gap found in
+    // this pass, since it sits at the confirmation prompt's own disclosure text, not merely
+    // somewhere upstream of it. `displayName` is wrapped too though not currently
+    // rendered in any preview (defense-in-depth, matching this file's practice for its adjacent
+    // sibling fields) — it does reach a platform API payload as an entity's `name`.
+    externalId: safeDisplayString(z.string().min(1)),
+    displayName: safeDisplayString(z.string().min(1)).optional(),
     metadata: z.record(z.unknown()).optional(),
   })
   .strict();
@@ -1007,8 +1209,8 @@ export const IdentitiesDeclSchema = z.record(
 
 const BlueprintServicePrincipalSchema = z
   .object({
-    externalId: z.string().min(1),
-    displayName: z.string().min(1),
+    externalId: safeDisplayString(z.string().min(1)),
+    displayName: safeDisplayString(z.string().min(1)),
   })
   .strict();
 
@@ -1020,7 +1222,7 @@ const ISSUER_ID_RE = CONTEXT_ID_RE;
 
 /**
  * Structural bounds on a captured/projected identity-claim NAME list, transcribed from the
- * platform's own `IssuerRegistrationDB.MAX_CAPTURED_CLAIMS` / `MAX_CAPTURED_CLAIM_NAME_LENGTH`.
+ * platform's own captured-claim count and name-length limits.
  *
  * Duplicated here (rather than inferred) for the same reason every other grammar in this file is:
  * the blueprint is validated at AUTHORING time, offline, with no platform round trip — so a bound
@@ -1071,10 +1273,17 @@ const BlueprintIssuerSchema = z
       message:
         "issuerId must be 3-31 chars, start with a lowercase letter, then lowercase letters/digits/dashes (e.g. 'auth0-prod')",
     }),
-    /** The IdP's `iss` claim value, exactly as it appears in tokens it issues. */
-    issuer: z.string().min(1),
-    /** The IdP's remote JWKS endpoint, used to verify presented tokens' signatures. */
-    jwksUri: z.string().min(1),
+    /**
+     * The IdP's `iss` claim value, exactly as it appears in tokens it issues. `safeUrlString`,
+     * not `safeDisplayString`: this is the trust-anchor field the plan preview exists to
+     * disclose, so it gets the stronger positive check (see that function's own doc) rather
+     * than the blocklist every OTHER free-text field uses — a homoglyph host here is exactly
+     * what an operator approving a plan must be able to trust reading. Virtually every real
+     * OIDC issuer is URL-shaped in practice, even though the spec does not strictly require it.
+     */
+    issuer: safeUrlString(z.string().min(1)),
+    /** The IdP's remote JWKS endpoint, used to verify presented tokens' signatures. `safeUrlString` — see `issuer`'s own comment just above. */
+    jwksUri: safeUrlString(z.string().min(1)),
     /**
      * The `aud` claim value a presented subject_token must carry. Must be globally
      * unique in combination with `issuer` — use a distinct audience per
@@ -1103,7 +1312,9 @@ const BlueprintIssuerSchema = z
      * back to calling this endpoint (with the presented token as the bearer credential) and reads
      * `emailClaim` from its JSON response instead. Omit to leave the fallback disabled.
      */
-    userinfoUri: z.string().min(1).optional(),
+    // `safeUrlString` — see `issuer`'s own comment above for why these three trust-anchor
+    // fields get the stronger positive check instead of `safeDisplayString`'s blocklist.
+    userinfoUri: safeUrlString(z.string().min(1)).optional(),
     /**
      * Opt-in self-service signup: a list of {signupType, roleId} pairs. When a first-time exchange
      * caller presents no invite token but names a signupType matching one of these (or omits it and
@@ -1150,18 +1361,20 @@ const BlueprintIssuerSchema = z
      */
     capturedClaims: z
       .array(
-        z
-          .string()
-          .max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
+        // `safeDisplayString` (a `.refine`) then the blank-name `.refine` — both ordered AFTER
+        // `.max`, since `.refine` returns a ZodEffects, which has no `.max` (`.refine` itself
+        // chains fine onto a ZodEffects — it's on the ZodType base, not ZodString-specific).
+        // `.min(1)` would be a LENGTH check and would admit a whitespace-only name while the
+        // message claims "non-blank"; the platform rejects on isBlank(). Note the value is
+        // REJECTED, not trimmed — it reaches the wire exactly as authored, matching how the
+        // platform stores it.
+        safeDisplayString(
+          z.string().max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
             message: `a capturedClaims entry must be at most ${MAX_CAPTURED_CLAIM_NAME_LENGTH} characters`,
-          })
-          // `.min(1)` is a LENGTH check and would admit a whitespace-only name while the message
-          // claims "non-blank"; the platform rejects on isBlank(). Note the value is REJECTED, not
-          // trimmed — it reaches the wire exactly as authored, matching how the platform stores it.
-          // Ordered after `.max` because `.refine` returns a ZodEffects, which has no `.max`.
-          .refine((name) => name.trim().length > 0, {
-            message: 'a capturedClaims entry must be a non-blank OIDC claim name',
           }),
+        ).refine((name) => name.trim().length > 0, {
+          message: 'a capturedClaims entry must be a non-blank OIDC claim name',
+        }),
       )
       .max(MAX_CAPTURED_CLAIMS, {
         message: `capturedClaims accepts at most ${MAX_CAPTURED_CLAIMS} entries`,
@@ -1450,14 +1663,24 @@ function lintNamespaces(value: unknown, ctx: z.RefinementCtx): void {
 // the discriminator routes the CLI loader to `createRecord` vs `ingestDocument` and
 // gives precise per-variant validation errors.
 const SeedCommonShape = {
-  /** The schema typeName this seed instantiates (should match a declared schema). */
-  typeName: z.string().min(1),
+  /**
+   * The schema typeName this seed instantiates (should match a declared schema).
+   * `safeDisplayString`, matching `BlueprintSchemaSchema.typeName`: NOT currently
+   * rendered into any plan-preview line (the seed step only counts records/documents),
+   * but it is the same field concept and costs nothing to close now rather than leave
+   * as a silent gap the next preview enhancement reopens.
+   */
+  typeName: safeDisplayString(z.string().min(1)),
   /**
    * Stable, caller-supplied id — the loader's idempotency key AND the value other
    * seeds resolve a `reference` against (across surfaces: a record seed may
    * reference a document seed by its externalId, and vice versa).
+   * `safeDisplayString`: not currently rendered in a plan-preview line (same as this schema's
+   * `typeName` just above until this pass), but the same "costs nothing to close now" standard
+   * applies — a short caller-supplied id, not free-form prose, so no YAML block-scalar
+   * collision risk like `description`'s.
    */
-  externalId: z.string().min(1),
+  externalId: safeDisplayString(z.string().min(1)),
   /**
    * Optional scope ownership for the seeded item, as `namespace:value` entries
    * (≤2, e.g. `['org:${{ identities.team }}']`; tokens substitute at apply
@@ -1546,8 +1769,8 @@ const SELF_TOKEN_RE = /\$\{\{\s*(?:self|under|member|input)\.[^}]*?\s*\}\}/;
 // A trigger's grant is resolved at fire time against the TRIGGER PRINCIPAL's identity, not the
 // author's. So `${{ self.scope.org }}` in a trigger dataScope does not mean "my org" — it means "the
 // trigger principal's org", which the platform cannot verify the author has any reach into. The
-// platform refuses it (`TriggerRuleHandler#rejectIdentityDerivedPlaceholders`); this lint reports it
-// offline, at validate/plan, instead of letting an apply fail partway through a provisioning run.
+// platform refuses it; this lint reports it offline, at validate/plan, instead of letting an
+// apply fail partway through a provisioning run.
 //
 // Use `${{ input.* }}` to confine a trigger's grant to the record that fired it, or name literals.
 const IDENTITY_DERIVED_TOKEN_RE = /\$\{\{\s*(?:self|under|member)\.[^}]*?\s*\}\}/;
@@ -1953,8 +2176,8 @@ function lintDataScopeKey(key: string, path: (string | number)[], ctx: z.Refinem
  * platform's own value in the index — silently costing recall and precision on type-scoped searches
  * — so the platform rejects it with a `400`.
  *
- * Transcribed from `RecordSchemaDB.RECORD_INDEXABLE_METADATA_RESERVED_FIELD_NAMES` and its document
- * sibling. Three things here are deliberate and must not be "simplified":
+ * Transcribed from the platform's own reserved-metadata-field-name lists for records and
+ * documents. Three things here are deliberate and must not be "simplified":
  *
  * - **The two sets stay SEPARATE, and a schema is checked against only the surface(s) it declares.**
  *   Checking the UNION rejects a real, shipping document-only blueprint over `recordType`, a key the
@@ -2503,8 +2726,8 @@ function lintTriggers(value: unknown, ctx: z.RefinementCtx): void {
       // 'self-family' zone, where self/under/member are correct and must stay legal for its ordinary
       // use as an access-profile grant.
       //
-      // The platform gate is not subtree-shaped: TriggerRuleHandler#rejectIdentityDerivedPlaceholders
-      // runs on BOTH the inline-scopes leg and the roleIds leg, because the escalation is in what the
+      // The platform gate is not subtree-shaped: it runs on BOTH the inline-scopes leg and the
+      // roleIds leg, because the escalation is in what the
       // grant RESOLVES to at fire time and a composed role carries a clause exactly as an inline one
       // does. Without this, a blueprint composing a role whose dataScope carries
       // `${{ self.scope.org }}` lints clean and then 400s partway through applying it — the
@@ -2803,16 +3026,32 @@ export const BLUEPRINT_FIELD_PHASES: Readonly<Record<string, LoaderPhase>> = Obj
 export const BlueprintSchema = z
   .object({
     /** Stable blueprint id (the `--blueprint <name>` selector + idempotency key). */
-    name: z.string().min(1),
-    version: z.string().min(1),
+    name: safeDisplayString(z.string().min(1)),
+    version: safeDisplayString(z.string().min(1)),
+    // NOT safeDisplayString — deliberately, after that wrap broke a real, multi-line-authored
+    // blueprint's `description` in review. `description` is never interpolated into any
+    // rendered plan-preview line (`buildPlan`'s header prints
+    // `name`/`version`/`contextId`, never `description` — confirmed by grep, not assumed), so
+    // wrapping it protected a sink that does not exist. It also actively broke real content:
+    // this is exactly the field authors reach for a YAML folded (`>`) or literal (`|`) block
+    // scalar to write, and clip chomping (the YAML default) always leaves exactly one trailing
+    // `\n` — which `safeDisplayString` rejects as a C0 control, indistinguishable from a
+    // forgery attempt. See `safeDisplayString`'s own doc for why this is a property of the
+    // wrapper, not a one-off carve-out for this field alone.
     description: z.string().min(1),
     /** The app-context the profile + scoped key bind to (e.g. "mcp"). */
     contextId: z.string().regex(CONTEXT_ID_RE, {
       message:
         "contextId must be 3-31 chars, start with a lowercase letter, then lowercase letters/digits/dashes (e.g. 'mcp')",
     }),
-    /** Human-readable app-context name; defaults to `MCP — <name>` (see {@link contextNameOf}) when absent. */
-    contextName: z.string().min(1).optional(),
+    /**
+     * Human-readable app-context name; defaults to `MCP — <name>` (see {@link contextNameOf})
+     * when absent. `safeDisplayString`: `contextNameOf` renders this raw into the FIRST line of
+     * every `buildPlan` summary (the `context '...' (...)` step) — a gap found after the rest
+     * of this file's forgery-character pass had already shipped; same shape as
+     * `name`/`version`/`description` right above it.
+     */
+    contextName: safeDisplayString(z.string().min(1)).optional(),
     /**
      * The deploying organization's own display name — distinct from {@link contextName}.
      * `contextName` is the blueprint author's fixed identity for the app (the same for every
@@ -2820,8 +3059,13 @@ export const BlueprintSchema = z
      * deployer-supplied `${{ inputs.x }}` value rather than hardcoded. Used for branding on
      * platform-sent correspondence (e.g. invite emails) alongside `contextName` — not a
      * replacement for it. See {@link companyNameOf}.
+     *
+     * `safeDisplayString`: not interpolated into any CLI plan-preview line today (confirmed —
+     * `loader.ts` never reads `companyName`), but it IS forwarded to the platform for the
+     * invite-email correspondence described above, a second class of human-read surface this
+     * value reaches. Wrapped for the same reason as every sibling scalar identity field here.
      */
-    companyName: z.string().min(1).optional(),
+    companyName: safeDisplayString(z.string().min(1)).optional(),
     schemas: z.array(BlueprintSchemaSchema).default([]),
     accessProfile: BlueprintAccessProfileSchema,
     servicePrincipal: BlueprintServicePrincipalSchema,
@@ -2899,15 +3143,18 @@ export const BlueprintSchema = z
      */
     identityProjectionClaims: z
       .array(
-        z
-          .string()
-          .max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
+        // safeDisplayString: rendered raw into buildPlan's context step (`identity projection:
+        // [...]`) — same rendered-plan-preview shape as `capturedClaims` (its structural pair,
+        // and fixed alongside it originally), missed here in the first pass; same ordering rule
+        // applies (safeDisplayString's own `.refine` before the blank-name `.refine` below,
+        // both after `.max` since `.refine` returns a ZodEffects with no `.max`).
+        safeDisplayString(
+          z.string().max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
             message: `an identityProjectionClaims entry must be at most ${MAX_CAPTURED_CLAIM_NAME_LENGTH} characters`,
-          })
-          // Same non-blank rule (and same ordering constraint) as `capturedClaims` above.
-          .refine((name) => name.trim().length > 0, {
-            message: 'an identityProjectionClaims entry must be a non-blank claim name',
           }),
+        ).refine((name) => name.trim().length > 0, {
+          message: 'an identityProjectionClaims entry must be a non-blank claim name',
+        }),
       )
       .max(MAX_CAPTURED_CLAIMS, {
         message: `identityProjectionClaims accepts at most ${MAX_CAPTURED_CLAIMS} entries`,

@@ -166,7 +166,7 @@ test('issuers: the check is per-entry — a valid entry does not excuse a diverg
 // ── capturedClaims (0.43.0) ──────────────────────────────────────────────
 // The platform half shipped in 0.43.0; this block is the blueprint-authoring half, unblocked by the
 // SDK pin the field's own deferral NOTE named as its precondition. Bounds are transcribed from
-// IssuerRegistrationDB.MAX_CAPTURED_CLAIMS / MAX_CAPTURED_CLAIM_NAME_LENGTH.
+// the platform's own captured-claim count and name-length limits.
 
 test('capturedClaims: omitting it is valid — the default is "capture nothing beyond email"', () => {
   const bp = parseBlueprint(minimal({ issuers: [VALID_ISSUER] }));
@@ -227,11 +227,15 @@ test('capturedClaims: REJECTS a whitespace-only name, not just an empty one', ()
   // check and admits ' ' — the platform rejects on isBlank(), and the CLI's own --captured-claim
   // rejects a blank one, so a length-only check here made the two adopters of one platform rule disagree
   // and produced the "lints clean, then 400s at apply" shape this package exists to prevent.
+  // '\t' and '\n' ALSO trip the schema's separate forgery-character guard (safeDisplayString —
+  // see types.ts), landing a SECOND issue at the same path, so this checks presence rather than
+  // an exact single-element array (same idiom as the roleAssumable/triggers[].fields duplicate-
+  // issue cases elsewhere in this suite).
   for (const blank of [' ', '   ', '\t', '\n']) {
-    assert.deepEqual(
-      issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: [blank] }] })),
-      ['issuers[0].capturedClaims[0]'],
-      `expected ${JSON.stringify(blank)} to be rejected`,
+    const paths = issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: [blank] }] }));
+    assert.ok(
+      paths.includes('issuers[0].capturedClaims[0]'),
+      `expected ${JSON.stringify(blank)} to be rejected, got ${JSON.stringify(paths)}`,
     );
   }
   // A name with INTERIOR whitespace is not blank and stays valid — trim, not "no spaces".

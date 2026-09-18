@@ -3,6 +3,138 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.19.0 — 2026-09-17
+
+### Changed
+
+- **⚠️ BREAKING: blueprint-authored free-text fields that reach a rendered, human-reviewed
+  surface — today, `@vectros-ai/cli`'s pre-apply plan preview and its identity-disclosure/
+  confirmation prompt — now REJECT forgery and homoglyph characters at parse time, instead of
+  trusting every renderer downstream to sanitize its own inputs. This NARROWS what
+  `parseBlueprint` accepts: a blueprint that parsed successfully under 0.18.x may now be
+  rejected if one of the affected fields carries one of the characters below.** Several fields
+  had no character-set constraint at all (`z.string().min(1)`, unlike `issuerId`/`roleId`/
+  `signupType`, which the schema already pins to a lowercase-letters/digits/dashes regex): a
+  blueprint's `name`/`version`/`contextName`; a service principal's `externalId`/`displayName`;
+  a declared identity's `externalId`/`displayName` (printed immediately before the CLI's "Apply
+  this plan?" gate); an issuer's `capturedClaims` entry; `identityProjectionClaims`; a
+  `dataScope` value (in `roles`, `accessProfile`, `fragments`, `roleAssumable`, or `triggers`);
+  an `allowedActions`/`fields` entry (in `roles`, `accessProfile`, or `triggers`); a field's
+  `fieldId`; a schema's `lookupFields` entry (bare-string, `fieldName`, or `fieldNames` form); a
+  trigger's `scriptRef.name`; a schema's or seed's `typeName`/seed's `externalId`; and the
+  `roles`/`triggers` map KEYS themselves (`roleId`/`triggerName`), not just their values.
+
+  **What is now rejected on those fields:** a raw newline or carriage return (forges a fake
+  extra line), an ANSI escape sequence, a Unicode line/paragraph separator (U+2028/U+2029), a
+  bidi-override/isolate character (U+202A-U+202E, U+2066-U+2069), a bidi MARK (U+200E, U+200F —
+  reorders neutral characters without a full override), an invisible/zero-width character
+  (U+00AD, U+061C, U+200B-U+200D, U+2060, U+FEFF), or a Unicode tag character (U+E0000-U+E007F).
+
+  **An issuer's `issuer`/`jwksUri`/`userinfoUri` get a STRONGER, different check** (`safeUrlString`,
+  not the blocklist above): the entire value must be printable ASCII, start with `https://`
+  (`http://` is REJECTED — see below), and its AUTHORITY (the substring between `://` and the
+  first `/`, `?`, or `#`) must match `[A-Za-z0-9.-]+(:\d+)?` — letters, digits, dot, dash, and an
+  optional numeric port. This is a GRAMMAR on the raw authority, not a call to `new URL()`
+  followed by more checks on the result — an earlier version of this check did parse with
+  `new URL()`, which turned out to have two bypasses of its own: it percent-decodes the
+  authority as part of parsing (so a percent-encoded homoglyph host decodes to the same string a
+  literal homoglyph would also get punycode-normalized to, indistinguishable after the fact), and
+  it splits `user@host` syntax into `.username`/`.hostname` separately (so `jwksUri:
+  trusted-name@evil.example` parses with `.hostname === 'evil.example'` while the RAW string an
+  operator reads shows the trusted-looking prefix first). The authority grammar excludes `%` and
+  `@` outright, closing both by construction rather than patching the check that missed them.
+
+  This closes the HOMOGLYPH class the blocklist cannot — a Cyrillic/Greek/etc. look-alike
+  character in a domain (e.g. a Cyrillic `а` standing in for Latin `a`) is invisible to any
+  enumerable "forgery character" list, since it is an ordinary-looking letter, just from the
+  wrong script. An author who needs a genuine internationalized domain must supply its already-
+  punycode (`xn--…`) ASCII form — which is what a real IdP presents on the wire, and which now
+  reads as visibly distinct from a trusted plain-ASCII domain (with percent-encoding and userinfo
+  excluded, what the operator reads in the rendered plan IS the actual authority).
+
+  `https://` only, not `http://`: the platform hard-refuses a non-`https` issuer/jwksUri/
+  userinfoUri at registration, so accepting `http://` here would repeat this package's own
+  "lints clean, then 400s at apply" anti-pattern for the exact field this check exists to catch
+  problems in beforehand.
+
+  **Residuals, named rather than chased:** a trailing-dot host (`good.example.`) still passes
+  (cosmetic); a bare IPv4 literal (`192.0.2.1`) still passes (a platform-side fetch concern this
+  preview isn't positioned to evaluate); a bracketed IPv6 literal (`[::1]`) is rejected as a side
+  effect of excluding `[`/`]`/extra `:` from the authority grammar (an acceptable false-reject,
+  not a gap — an IdP is never realistically IPv6-literal-addressed in practice).
+
+  **What this does NOT close, stated rather than implied:** (1) LENGTH is not bounded by either
+  check (no `.max`) — `@vectros-ai/cli`'s `sanitizeForPlanDisplay` caps it at the render site
+  instead. (2) The blocklist does not close the HOMOGLYPH class for a non-URL field — `name`,
+  `contextName`, `fieldId`, and similar identifier/prose fields can still be authored with a
+  visually-confusable character from a different Unicode script, since no enumerable blocklist
+  can cover the full confusables space and these fields have no "must be ASCII" constraint a
+  legitimate author could always satisfy the way a URL author can.
+
+  **`description` (the blueprint's own top-level field) is DELIBERATELY UNAFFECTED — not wrapped
+  at all, on either check.** It is never rendered on any operator-facing surface, and this repo's
+  own flagship example blueprint authors it as a YAML folded (`>`) block scalar, which always
+  parses to a string ending in exactly one trailing newline — indistinguishable from a forgery
+  attempt to any of the checks above, and a defect this exact wrap introduced and then had
+  reverted during review. If your blueprint's `description` is written as YAML block-scalar
+  prose (the common case for a multi-line description), this release does not affect it.
+
+  A new `safeDisplayString` schema wrapper (blocklist) and `safeUrlString` schema wrapper
+  (positive URL check) close their respective classes at the schema once, for every current and
+  future renderer, rather than requiring each new rendered field to remember its own
+  sanitization. A map KEY (`roles`/`triggers`) uses `z.record`'s two-argument key-schema form,
+  since neither wrapper can reach a record's key type directly, only a `ZodString` value.
+
+  This narrows the vector; it does not eliminate every theoretical surface a `Blueprint` object
+  could reach without ever passing through `parseBlueprint` (e.g. a caller constructing one by
+  hand, which is how every bundled/first-party blueprint is loaded today) — `@vectros-ai/cli`'s
+  own plan-preview renderer keeps its existing per-site sanitization as a second line of defense
+  for exactly that case, and this package's own test suite round-trips every bundled blueprint
+  through `parseBlueprint` (`GUARD: every bundled blueprint is structurally valid`) so a stray
+  forgery character introduced by accident is still caught before it ships, even though the
+  runtime `--blueprint <name>` path does not re-validate a bundled blueprint on every run.
+
+  **Why a MINOR bump, not a patch, for a security fix:** this narrows what a previously-valid
+  input this library accepts — a currently-valid blueprint could newly fail `parseBlueprint` if
+  it carries one of the characters above in one of the affected fields (URL fields: also if the
+  domain isn't plain-ASCII or the value isn't a well-formed URL). A published validation
+  library's accepted-input surface is part of its contract; this repo's own blueprints were
+  checked and are unaffected (after the `description` revert above), but a third party's cannot
+  be. Run `vectros blueprint validate` against your blueprint(s) before upgrading.
+
+### Docs
+
+- **README correction: a script row DOES carry provenance now.** The `scripts:` section
+  previously said "a script row carries no record of which blueprint pushed it" — true before
+  `@vectros-ai/cli`'s script push-ownership gate shipped, false now. Corrected to describe the
+  current behavior: each version does carry a provenance marker (used to gate pushing a new
+  version onto an existing name), it's deletion that still has no second factor to gate on
+  safely. Also documents the new push-ownership refusal and `--allow-script-adoption`. No
+  behavior in this package changed — `@vectros-ai/blueprints` itself doesn't enforce any of this,
+  the CLI does — so no version bump, just the correction.
+
+- **README corrections for three 0.44.0 platform changes.** Deleting a script version still
+  referenced by a live trigger rule is now refused (409, naming the rule) instead of silently
+  breaking the trigger. The `issuers` field list was missing the new `restrictedToDomain` field,
+  and didn't note that `jwksUri`/`userinfoUri` must now be `https://` or that a tenant is capped
+  at 50 registered issuers. The `triggers` section didn't note that a grant naming a control-plane
+  resource now requires the new `trigger-control-plane-grant` capability. No behavior in this
+  package changed — these are all platform-enforced, not authored here — so no version bump.
+
+### Fixed
+
+- **Ten source comments named internal backend classes/methods by name** (in `src/types.ts` and
+  four test files) describing which platform-side validation, limit, or gate a piece of
+  authoring-time logic mirrors. Reworded to describe the mechanism without the class/method name;
+  no behavioral change. Also reworded this file's own 0.12.0 entry, which named an internal
+  workstream code, for the same reason — a `CHANGELOG.md` entry ships in every future tarball and
+  mirror snapshot, so leaving an old one uncorrected re-publishes the leak with every release.
+
+- **Two more sites named an internal backend identifier or an internal review-process finding**
+  (`src/inputs.ts`'s doc comment naming an internal placeholder-grammar constant; a test in
+  `tests/triggers.test.ts` attributing a fix to an internal reviewer's finding) — found by a
+  post-merge audit. Reworded to describe the mechanism/gap generically; no behavioral change.
+
 ## 0.18.0 — 2026-09-07
 
 ### Added
@@ -516,7 +648,7 @@ This project adheres to [Semantic Versioning](https://semver.org).
   lockstep — a misplaced multi-segment token (e.g. in a seed record field)
   is still caught, the same as the flat form always was.
 
-- **`${{ member.scope.<ns> }}` (and its `:<level>` selector form) — the R39
+- **`${{ member.scope.<ns> }}` (and its `:<level>` selector form) — the
   namespace-membership runtime placeholder — is now supported, matching
   `self`/`under`.** It had no resolver entry at all: the install-time
   resolver rejected it outright as a malformed reference before it could

@@ -176,7 +176,7 @@ const DEFERRED_BARE_TOKENS = new Set(['any']);
  * whole-string variant needed.
  *
  * An optional trailing `:label` on the LAST segment covers `member`'s leveled selector,
- * {@code ${{ member.scope.<ns>:<level> }}} (`TokenScope.MEMBER_PLACEHOLDER`'s grammar) — `self`/
+ * {@code ${{ member.scope.<ns>:<level> }}} (the platform's own placeholder grammar for it) — `self`/
  * `under` never use a colon suffix, so this is additive for them (their tokens simply never match
  * it). Without this, the colon breaks the plain `[A-Za-z_]\w*` segment match and the WHOLE colon
  * form fails install-time resolution outright as a malformed reference, same shape as the missing
