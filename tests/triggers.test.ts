@@ -598,7 +598,7 @@ test('fields: ACCEPTS a lookup-only field the schema never declares in fields[]'
 });
 
 test("fields: ACCEPTS a lookup's sortBy TARGET — the fourth projectable path", () => {
-  // getInlineProjectionFieldNames() adds the sortBy target unless it is createdAt/lastUpdated, and
+  // The platform's projectable-field rule adds the sortBy target unless it is createdAt/lastUpdated, and
   // that target need not be inline, filterable, or a leg. Reading the field-level flags alone
   // misses it, which is how the rule got stated too narrowly in five places.
   const bp = parseBlueprint(minimal({

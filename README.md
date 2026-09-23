@@ -46,6 +46,9 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   deployer-supplied `${{ inputs.x }}` value). Used for branding on platform-sent correspondence
   (e.g. invite emails) alongside `contextName`, not as a replacement for it. Unlike
   `contextNameOf`, has no forced default — returns `undefined` when the blueprint omits it.
+- `isRestrictedToDomainName(value)` — whether a string is a lowercase ASCII DNS name of the shape an
+  issuer's `restrictedToDomain` accepts, for a tool that takes the same value from somewhere else
+  (for example a command-line flag) and should not carry its own copy of the grammar.
 - `BUNDLED_BLUEPRINTS` / `BLUEPRINT_NAMES` / `getBlueprint(name)` — the
   curated library: `task-management` (the minimal authoring exemplar),
   `agentic-sdlc` (a whole-SDLC system of
@@ -450,7 +453,7 @@ holds.
 already has a version, the loader checks who pushed the current one: a name already marked for a
 *different* blueprint is refused outright (push under a different name instead); a name with no
 marker at all (hand-authored, or pushed before this marker existed) is refused unless the operator
-re-runs with `--allow-script-adoption` — a flag only a human running `bootstrap` can supply, never
+re-runs with `--allow-script-adoption` — a flag only the operator running `bootstrap` or `vectros blueprint apply` can supply, never
 something a blueprint can declare for itself. A blueprint that already owns a name (or is pushing it
 for the first time) needs neither. Adoption itself is subject to the platform's own authorization on
 top of this flag: an account owner can adopt any unmarked name, but one Dev Portal team member cannot
@@ -461,7 +464,17 @@ A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
 audience, contextId, subClaim?, emailClaim?, userinfoUri?, restrictedToDomain?, selfSignupPolicies?, capturedClaims? }`.
 `jwksUri` and, when set, `userinfoUri` must be `https://` URLs — the platform rejects an `http://` value
-at apply time. A tenant is capped at 50 registered issuers. Unlike `schemas`/`accessProfile`/
+at apply time. `restrictedToDomain` names a domain already verified for your account (verified once, in
+the developer portal) and is written as a lowercase DNS name such as `acme.com`, never a URL: it scopes
+the registration to that domain — a token matches only when its `hd` claim equals it. Google Workspace emits
+`hd` natively; other identity providers need a claims-mapping rule that emits a claim named exactly `hd`, and
+a token without a matching one is not matched at all, so scoping an issuer whose users sign in without it
+locks them out. An unverified domain fails the apply with the platform's `400`.
+Omitting it on a re-apply leaves an existing scope unchanged; removing one is
+`vectros issuers update --clear-restricted-to-domain`. An issuer declared WITHOUT it starts
+`pending_verification` on platform 0.45.0 and later and accepts no token until you prove you control the identity
+provider: `vectros bootstrap` or `vectros blueprint apply` (`@vectros-ai/cli` 0.23.0 and later) still finishes and exits `0`, prints the challenge and the command that answers it
+(`vectros issuers verify`) at the end of its output, and exits `4` for a pending issuer only when given `--require-verified-issuers`. A tenant is capped at 50 registered issuers. Unlike `schemas`/`accessProfile`/
 `roles` (applied under a per-context token), issuers are applied in the loader's
 **bootstrap-token phase**, alongside app-context/service-principal creation —
 tenant-wide provisioning config that needs the bootstrap credential's owner-only

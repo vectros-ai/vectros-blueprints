@@ -198,7 +198,7 @@ test('SHOWCASE: clinical-intake finds an intake by PHI via a sensitive blind-ind
 test('SHOWCASE: bundled date fields are range-queryable and re-model nothing that sorts wrong', () => {
   // Every range-enabled bundled lookup names a SORT-SAFE field: a `date` (ISO-8601, lexical
   // order == chronological) or a `number` (agentic-sdlc `memory.priority` band — the
-  // platform's encodeSortableValue lexically encodes both). Pins the audit decision that
+  // platform's sortable-value encoding lexically encodes both). Pins the audit decision that
   // ordinal enum STRINGS (e.g. task priority low<urgent) are deliberately left as equality,
   // NOT range — they don't sort lexically; a numeric band does.
   const rangeFields: string[] = [];

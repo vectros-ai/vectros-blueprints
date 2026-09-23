@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBlueprint, BlueprintValidationError, type Blueprint } from '../src/types.js';
+import { parseBlueprint, BlueprintValidationError, isRestrictedToDomainName, type Blueprint } from '../src/types.js';
 
 function minimal(overrides: Partial<Blueprint> = {}): Blueprint {
   return {
@@ -243,4 +243,85 @@ test('capturedClaims: REJECTS a whitespace-only name, not just an empty one', ()
     issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['given name'] }] })),
     [],
   );
+});
+
+// --- restrictedToDomain ---------------------------------------------------------------------------
+
+test('issuers[].restrictedToDomain: accepts a lowercase DNS name, a subdomain, and a punycode label', () => {
+  for (const domain of ['acme.com', 'eng.acme.co.uk', 'a-b.example.org', 'xn--bcher-kva.example', '1.example.io']) {
+    const bp = parseBlueprint(minimal({ issuers: [{ ...VALID_ISSUER, restrictedToDomain: domain }] }));
+    assert.equal(bp.issuers?.[0].restrictedToDomain, domain, `expected '${domain}' to parse`);
+  }
+});
+
+test('issuers[].restrictedToDomain: omitted stays undefined — a domain-less issuer is the default', () => {
+  const bp = parseBlueprint(minimal({ issuers: [VALID_ISSUER] }));
+  assert.equal(bp.issuers?.[0].restrictedToDomain, undefined);
+});
+
+test('issuers[].restrictedToDomain: REJECTS anything that is not a lowercase ASCII DNS name', () => {
+  const bad: Array<[string, string]> = [
+    ['', 'empty'],
+    ['acme', 'a single label'],
+    ['Acme.com', 'uppercase — the platform stores the lowercase form, so the reviewer must read that'],
+    ['https://acme.com', 'a URL, not a domain'],
+    ['acme.com/path', 'a path'],
+    ['acme.com:443', 'a port'],
+    ['acme.com.', 'a trailing dot'],
+    ['.acme.com', 'a leading dot'],
+    ['acme..com', 'an empty label'],
+    ['-acme.com', 'a label starting with a dash'],
+    ['acme-.com', 'a label ending with a dash'],
+    ['acme_corp.com', 'an underscore'],
+    [' acme.com', 'leading whitespace'],
+    ['acme.com\n', 'a trailing newline'],
+    // Assembled at runtime so no literal email-shaped string appears in the source.
+    [`user${'@'}acme.com`, 'userinfo'],
+    ['аcme.com', 'a Cyrillic homoglyph of "a"'],
+    [`${'a'.repeat(64)}.com`, 'a 64-character label'],
+    [`${Array(60).fill('abcd').join('.')}.com`, 'a name over 253 characters'],
+  ];
+  for (const [value, why] of bad) {
+    assert.deepEqual(
+      issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, restrictedToDomain: value }] })),
+      ['issuers[0].restrictedToDomain'],
+      `expected rejection for ${why}: ${JSON.stringify(value)}`,
+    );
+  }
+});
+
+test('issuers[].restrictedToDomain: the length limits are exact — a 63-character label and a 253-character name pass, one more fails', () => {
+  // Labels of 63 characters are the most a label may carry; three of them, a shorter fourth and
+  // three dots make exactly 253 (63 * 3 + 61 + 3). A 254th character must fail on total length alone.
+  const build = (last: number): string => [...Array(3).fill('a'.repeat(63)), 'b'.repeat(last)].join('.');
+  const at253 = build(61);
+  const at254 = build(62);
+  assert.equal(at253.length, 253);
+  assert.equal(at254.length, 254);
+  for (const domain of [`${'a'.repeat(63)}.com`, at253]) {
+    const bp = parseBlueprint(minimal({ issuers: [{ ...VALID_ISSUER, restrictedToDomain: domain }] }));
+    assert.equal(bp.issuers?.[0].restrictedToDomain, domain, `expected a ${domain.length}-character name to parse`);
+  }
+  for (const domain of [`${'b'.repeat(64)}.com`, at254]) {
+    assert.deepEqual(
+      issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, restrictedToDomain: domain }] })),
+      ['issuers[0].restrictedToDomain'],
+      `expected a ${domain.length}-character name to be rejected`,
+    );
+  }
+});
+
+test('isRestrictedToDomainName is the schema grammar: it accepts and rejects exactly what an issuer entry does', () => {
+  // The CLI validates its own flag with this function instead of a copy of the regex, so the two cannot drift.
+  const values = ['acme.com', 'eng.acme.co.uk', 'xn--bcher-kva.example', 'Acme.com', 'acme', 'acme.com.', '.acme.com',
+    '-acme.com', 'acme-.com', 'acme.com/x', 'https://acme.com', 'аcme.com', ''];
+  for (const value of values) {
+    let parses = true;
+    try {
+      parseBlueprint(minimal({ issuers: [{ ...VALID_ISSUER, restrictedToDomain: value }] }));
+    } catch {
+      parses = false;
+    }
+    assert.equal(isRestrictedToDomainName(value), parses, `disagreement for ${JSON.stringify(value)}`);
+  }
 });

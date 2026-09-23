@@ -3,6 +3,31 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.20.0 — 2026-09-22
+
+### Added
+
+- **`issuers[].restrictedToDomain`.** A blueprint's issuer may now name a domain already verified
+  for your account (verified once, in the developer portal). The registration is then scoped to
+  that domain: a token matches only when its `hd` claim equals it, and an unrelated registration of
+  the same issuer and audience never blocks it. A token with no matching `hd` claim is not matched
+  at all, so scoping an issuer whose users sign in without one locks them out. It is written as a
+  lowercase ASCII DNS name (`acme.com`): a URL, an uppercase letter, a port, or a non-ASCII
+  look-alike domain is rejected when the blueprint is parsed; write an internationalized domain in
+  its punycode (`xn--…`) form. The check is also exported as `isRestrictedToDomainName(value)`, so a
+  tool that takes the same value elsewhere does not need its own copy of the grammar.
+  `vectros bootstrap` shows it in the plan and forwards it on register and on re-apply; leaving it
+  out on a re-apply keeps an existing scope, it does not clear it.
+
+### Changed
+
+- README: an issuer declared without `restrictedToDomain` starts `pending_verification` on platform 0.45.0 and
+  later; `vectros bootstrap` or `vectros blueprint apply` (`@vectros-ai/cli` 0.23.0 and later) prints the challenge and the
+  `vectros issuers verify` command, and exits `0` (or `4` with `--require-verified-issuers`). The README names
+  `vectros blueprint apply` alongside `vectros bootstrap` where it says who supplies `--allow-script-adoption` and
+  how a pending issuer is handled. The blueprint format itself is unchanged: the verification
+  fields are on the platform's response, not something a blueprint declares.
+
 ## 0.19.0 — 2026-09-17
 
 ### Changed

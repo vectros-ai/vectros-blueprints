@@ -812,7 +812,7 @@ const BlueprintAccessProfileSchema = z
 // A single role clause — mirrors the platform/SDK ScopeClause, now THREE-part:
 // allowedActions + optional per-clause dataScope + optional per-clause
 // capabilities (`allowed_actions` / `data_scope` / `granted_capabilities` on
-// the wire — `ScopeClause.java:36`). Multi-clause roles let one role grant
+// the wire). Multi-clause roles let one role grant
 // several (action-set, data-scope, capability-set) rules at once, evaluated
 // per-clause server-side.
 // `${{ self.* }}` placeholders are legal in a clause's dataScope: they are a
@@ -1221,6 +1221,28 @@ const BlueprintServicePrincipalSchema = z
 const ISSUER_ID_RE = CONTEXT_ID_RE;
 
 /**
+ * A lowercase ASCII DNS name with at least two labels, each 1-63 characters of letters, digits and
+ * dashes (no leading/trailing dash), at most 253 characters overall.
+ *
+ * A POSITIVE grammar, for the same reason `safeUrlString` is one: a domain is read and trusted by the
+ * human approving a plan, and only a "must be plain ASCII" rule — not a blocklist — closes a
+ * look-alike (Cyrillic/Greek) domain. Lowercase-only because the platform stores the lowercased form
+ * and compares a token's `hd` claim against it, so accepting `Acme.com` would show the reviewer text
+ * that is not what gets scoped.
+ */
+const RESTRICTED_DOMAIN_RE = /^(?=.{3,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/**
+ * Whether `value` is a lowercase ASCII DNS name of the shape a blueprint's `restrictedToDomain`
+ * accepts. Exported so a tool that takes the same value from another place (the CLI's
+ * `--restricted-to-domain` flag) validates with THIS grammar rather than a copy that can drift.
+ * Case is the caller's concern: lowercase a mixed-case input before asking.
+ */
+export function isRestrictedToDomainName(value: string): boolean {
+  return RESTRICTED_DOMAIN_RE.test(value);
+}
+
+/**
  * Structural bounds on a captured/projected identity-claim NAME list, transcribed from the
  * platform's own captured-claim count and name-length limits.
  *
@@ -1315,6 +1337,32 @@ const BlueprintIssuerSchema = z
     // `safeUrlString` — see `issuer`'s own comment above for why these three trust-anchor
     // fields get the stronger positive check instead of `safeDisplayString`'s blocklist.
     userinfoUri: safeUrlString(z.string().min(1)).optional(),
+    /**
+     * Opt-in domain scope: a domain ALREADY VERIFIED for your account (verified once, by the
+     * account owner, in the developer portal). The registration's `(issuer, audience)` uniqueness
+     * is then scoped to that domain, so an unrelated registration of the same pair never blocks
+     * it, and a presented token matches only when its `hd` claim equals the domain (Google
+     * Workspace emits `hd` natively; other identity providers need a claims-mapping rule that
+     * emits a claim named exactly `hd`). A token with no matching `hd` claim is not matched at all,
+     * so scoping an issuer that already has users signing in without one locks those users out.
+     *
+     * Written the way the platform stores it: a lowercase, ASCII DNS name (`acme.com`), never a URL.
+     * An internationalized domain must be given in its punycode (`xn--…`) form, the same rule
+     * `issuer` follows, so what an operator reads in the plan preview is the domain that is
+     * actually scoped. An unverified domain fails the apply with the platform's `400`.
+     *
+     * Omit to register a domain-less issuer. Omitting it on a re-apply leaves an existing scope
+     * unchanged; removing a scope is `vectros issuers update --clear-restricted-to-domain`.
+     */
+    restrictedToDomain: z
+      .string()
+      .regex(RESTRICTED_DOMAIN_RE, {
+        message:
+          "restrictedToDomain must be a lowercase DNS name such as 'acme.com' — letters, digits and dashes " +
+          'in dot-separated labels, at least two labels, no scheme, path, port or uppercase; write an ' +
+          'internationalized domain in its punycode (xn--…) form',
+      })
+      .optional(),
     /**
      * Opt-in self-service signup: a list of {signupType, roleId} pairs. When a first-time exchange
      * caller presents no invite token but names a signupType matching one of these (or omits it and
@@ -1934,8 +1982,8 @@ function lintIdentityRefs(value: unknown, ctx: z.RefinementCtx): void {
 const SCOPE_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 // The scope-NAMESPACE grammar + forbidden set — mirrors the CLI's own copy
-// byte-for-byte (both verified independently against the platform's
-// `ScopeNamespaces.NAMESPACE_PATTERN`/`FORBIDDEN_NAMESPACES`, not against each
+// byte-for-byte (both verified independently against the platform's own
+// namespace pattern and forbidden set, not against each
 // other, so this is not a re-derivation of a re-derivation). `org`/`client`
 // are RESERVED namespaces (platform-defined semantics) but are NOT forbidden —
 // they're valid, ordinary `scope:<ns>` namespaces. `user`/`self`/`tenant`/
@@ -1951,7 +1999,7 @@ const FORBIDDEN_SCOPE_NAMESPACES: ReadonlySet<string> = new Set([
 
 /**
  * Null when `namespace` is a scope namespace the platform will accept, else the reason it will not
- * (mirrors `ScopeNamespaces.namespaceGrammarError`, same check order — forbidden set FIRST, so a
+ * (mirrors the platform's own namespace-grammar check, same check order — forbidden set FIRST, so a
  * reserved word gets the "reserved" message rather than a shape complaint).
  */
 function scopeNamespaceGrammarError(namespace: string): string | null {
@@ -2057,7 +2105,7 @@ function lintIdentityOverrides(
 
 // `schemas[].scopes` and `seed[].scopes` share ONE shape: an array of
 // `<namespace>:<value>` strings (split on the FIRST colon, mirroring the
-// platform's own `ScopeNamespaces.parseScopeValue` — splitting on the LAST
+// platform's own scope-value parsing — splitting on the LAST
 // colon, or limiting the split, would silently REINTERPRET a malformed entry
 // instead of rejecting it), ≤2 entries, currently entirely unvalidated here —
 // the same "lints clean, 400s at apply" gap `lintIdentityOverrides` closes for
@@ -2068,7 +2116,7 @@ function lintIdentityOverrides(
 //
 // A namespace appearing twice with DIFFERENT values is rejected — the array
 // carries at most one value per namespace, and the platform's own
-// `applyAuthoredScopes` rejects the same shape; an exact repeat (same
+// authored-scopes validation rejects the same shape; an exact repeat (same
 // namespace AND same value) is tolerated as harmless redundancy rather than
 // flagged as a conflict. Found in review: the schema-level `.max()` still
 // bounds RAW entry count (not distinct-namespace count), so an exact-repeat
@@ -2484,7 +2532,7 @@ function lintTriggerFields(value: unknown, ctx: z.RefinementCtx): void {
     if (!schema) continue; // lintTriggers already reports the unknown schemaName
 
     // Everything a LOOKUP makes projectable. Transcribed from the platform's own
-    // getInlineProjectionFieldNames(), which adds three things — and the third is easy to miss:
+    // rule for what a lookup makes projectable, which adds three things — and the third is easy to miss:
     //   - a bare-string lookup's name;
     //   - every leg of an object lookup, composite included;
     //   - the lookup's `sortBy` TARGET, unless it is the built-in createdAt/lastUpdated. A sortBy

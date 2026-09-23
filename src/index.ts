@@ -10,6 +10,7 @@ export {
   parseBlueprintJson,
   contextNameOf,
   companyNameOf,
+  isRestrictedToDomainName,
   type Blueprint,
   type BlueprintFieldDef,
   type BlueprintSchemaDef,

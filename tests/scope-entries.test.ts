@@ -76,7 +76,7 @@ test('schemas[].scopes: REJECTS an entry with an empty value ("org:")', () => {
 // A malformed value containing a SECOND colon must be rejected as a bad VALUE
 // (via the value grammar, which excludes ':'), not silently reinterpreted by
 // splitting on a different colon — mirrors the platform's own
-// ScopeNamespaces.parseScopeValue, which splits on the FIRST colon only.
+// scope-value parsing, which splits on the FIRST colon only.
 test('schemas[].scopes: REJECTS "org:a:b" as a bad value, not a reinterpreted namespace/value pair', () => {
   const paths = issuePaths(withSchemaScopes(['org:a:b']));
   assert.ok(paths.includes('schemas[0].scopes[0]'), `expected an issue, got ${JSON.stringify(paths)}`);
@@ -161,7 +161,7 @@ test('seed[].scopes: REJECTS a 3rd entry (structural .max(2), previously unenfor
 
 // ── one value per namespace ─────────────────────────────────────────────────
 //
-// Found in review: the platform's own applyAuthoredScopes rejects a namespace
+// Found in review: the platform's own authored-scopes validation rejects a namespace
 // repeated with a conflicting value — this array previously accepted it.
 
 test('schemas[].scopes: REJECTS the same namespace twice with DIFFERENT values', () => {
