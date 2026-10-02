@@ -1352,7 +1352,11 @@ const BlueprintIssuerSchema = z
      * actually scoped. An unverified domain fails the apply with the platform's `400`.
      *
      * Omit to register a domain-less issuer. Omitting it on a re-apply leaves an existing scope
-     * unchanged; removing a scope is `vectros issuers update --clear-restricted-to-domain`.
+     * unchanged. On platform 0.45.0 and later a scope is removed only from a registration that
+     * already holds the unrestricted `(issuer, audience)` pair, which one created with a domain
+     * normally does not (`vectros issuers update --clear-restricted-to-domain` is refused for it):
+     * replace it with a new issuer declared without `restrictedToDomain` and verify that, under a
+     * different app context if the old issuer has served users.
      */
     restrictedToDomain: z
       .string()

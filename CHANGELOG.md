@@ -3,6 +3,17 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.20.1 — 2026-10-01
+
+### Changed
+
+- **The README and the `restrictedToDomain` field documentation describe how to get an unrestricted issuer from a
+  domain-scoped one.** The platform refuses `vectros issuers update --clear-restricted-to-domain` unless the
+  registration already holds the unrestricted `(issuer, audience)` pair, which one created scoped to a domain does
+  not. Delete the scoped issuer, declare a new one without `restrictedToDomain`, and verify it with
+  `vectros issuers verify`. A context holds one active issuer, and an issuer that any user has been created or
+  matched through cannot be deleted; in that case declare the new issuer under a different app context.
+
 ## 0.20.0 — 2026-09-22
 
 ### Added

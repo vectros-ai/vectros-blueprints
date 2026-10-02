@@ -470,8 +470,12 @@ the registration to that domain — a token matches only when its `hd` claim equ
 `hd` natively; other identity providers need a claims-mapping rule that emits a claim named exactly `hd`, and
 a token without a matching one is not matched at all, so scoping an issuer whose users sign in without it
 locks them out. An unverified domain fails the apply with the platform's `400`.
-Omitting it on a re-apply leaves an existing scope unchanged; removing one is
-`vectros issuers update --clear-restricted-to-domain`. An issuer declared WITHOUT it starts
+Omitting it on a re-apply leaves an existing scope unchanged. On platform 0.45.0 and later a scope is removed only
+from a registration that already holds the unrestricted `(issuer, audience)` pair, which one created with a domain
+normally does not: `vectros issuers update --clear-restricted-to-domain` is refused for it. To get an unrestricted
+issuer, delete the scoped one, declare a new one without `restrictedToDomain`, and verify it with
+`vectros issuers verify`. A context holds one active issuer, and an issuer that any user has been created or
+matched through cannot be deleted; in that case declare the new issuer under a different app context. An issuer declared WITHOUT it starts
 `pending_verification` on platform 0.45.0 and later and accepts no token until you prove you control the identity
 provider: `vectros bootstrap` or `vectros blueprint apply` (`@vectros-ai/cli` 0.23.0 and later) still finishes and exits `0`, prints the challenge and the command that answers it
 (`vectros issuers verify`) at the end of its output, and exits `4` for a pending issuer only when given `--require-verified-issuers`. A tenant is capped at 50 registered issuers. Unlike `schemas`/`accessProfile`/
@@ -663,15 +667,13 @@ replaces).
 
 ## Testing a blueprint
 
-Blueprints are tested **like code**, in three layers:
+Blueprints are tested **like code**, in two layers:
 
 1. **Change-time (every PR, no creds):** the `@vectros-ai/cli` unit suite runs every
    `BUNDLED_BLUEPRINT` through the harness core (snapshot → apply → assert → teardown)
    with a fake client, plus the structural + scope-gate + `fieldType` guards here. A
    new blueprint the loader can't provision fails here.
-2. **Post-deploy canary:** one bundled blueprint runs a live `blueprint-test` in the
-   CLI staging smoke to catch unrelated API-contract regressions.
-3. **Live credential proof (one-time, on a new/changed blueprint):**
+2. **Live credential proof (one-time, on a new/changed blueprint):**
    `vectros blueprint-test <name>` against your tenant (apply → assert a real `ssk_*`
    ping → created-only teardown). Needs a bootstrap token — see the `@vectros-ai/cli`
    docs.

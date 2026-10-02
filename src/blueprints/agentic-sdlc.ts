@@ -108,7 +108,8 @@ const EDITOR_ACTIONS = [...DATA_PLANE_ACTIONS, 'records:d', 'documents:d', 'fold
 // reads EVERY document in the context. That is safe ONLY because members have
 // NO document-CREATE grant anywhere in the role, so no private (scopes: [])
 // document can exist here. Do NOT add `documents:c`/`documents:u` to any member
-// clause until documents gain a per-type read qualifier; a test pins this.
+// clause until `documents:r` is scoped per type (platform 0.46.0 accepts `documents:r:<type>`; this clause
+// does not use it yet); a test pins this.
 const MEMBER_SHARED_READ_ACTIONS = [
   'records:r:control',
   'records:r:convention',
