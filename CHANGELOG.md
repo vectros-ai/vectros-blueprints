@@ -3,6 +3,36 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.20.2 — 2026-10-12
+
+### Documentation
+
+- **README corrections.** Removing a trigger from a blueprint de-provisions it on `vectros bootstrap` and on
+  `vectros blueprint apply --prune`; `blueprint apply` without `--prune` deletes nothing. A trigger is removed only when
+  it carries the blueprint's own marker and its service principal is the one the blueprint created. `vectros access
+  grant` takes `--context`. An issuer's `issuer`, `jwksUri` and `userinfoUri` must be printable-ASCII `https://` URLs
+  whose host is letters, digits, dots and dashes with an optional port, and the package rejects any other value as soon as the
+  blueprint is parsed. A `reference` field without `targetSurface`, or with `targetSurface:
+  entity`, is rejected when the blueprint is parsed. `externalId`, `userId` and `scopes` are not payload fields, and the
+  examples do not declare `externalId`. `capabilities` belongs on `accessProfile`, on a role clause and on a trigger
+  entry only. `agentic-sdlc` also ships the store-only `candidate` schema. `identityProjectionClaims` applies only when
+  the app context is created. `${{ self.* }}`, `${{ under.self.* }}` and `${{ member.* }}` are refused in a trigger's
+  grant, including through a composed role. A `sensitive` and `searchable` field is refused by the
+  platform at schema creation, not by `validate`. Range lookups order `number` and `date` fields numerically and
+  chronologically and string fields lexically. An `(issuer, audience)` pair is unique across all accounts. Declared
+  identities resolve after the context, service principal and namespaces exist. `@vectros-ai/cli` forwards
+  `capabilities` and admits only `member-lifecycle` and `delegate-principal-stamp`, and refuses a trigger grant on a
+  control-plane resource. Signup does not register the `org` and `client` namespaces, so an account has
+  them only once it registers them.
+- **The `namespaces` field documentation says the same about `org` and `client`.**
+- **Source comments state their rules themselves, and the `agentic-sdlc` guide points at the right section.** Comments
+  that pointed at internal design documents now say what the rule is, so the source maps that ship with the package read
+  on their own, and the guide's two references to the `memory` tier name its section (5), not section 8. No behavior
+  changes.
+- **The README states where a declared identity lives.** A `user`, and an entity in a tenant-wide namespace, are
+  tenant-placed and survive `context destroy`; an entity in a namespace the blueprint declares (context-owned by
+  default) is placed in the blueprint's context and erased with it.
+
 ## 0.20.1 — 2026-10-01
 
 ### Changed

@@ -210,7 +210,7 @@ test("triggers: REJECTS a manifest entry with no '.' (not '<noun>.<verb>' shaped
   assert.ok(paths.some((p) => p.includes('manifest')), JSON.stringify(paths));
 });
 
-// ── ${{ input.* }} placement (design §6.2) — confined to triggers[].dataScope, same posture
+// ── ${{ input.* }} placement — confined to triggers[].dataScope, same posture
 // ${{ self.* }}/${{ member.* }} already have for roles[].dataScope. ───────────────────────────
 
 test('triggers: ACCEPTS ${{ input.scope.org }} inside a trigger entry dataScope', () => {

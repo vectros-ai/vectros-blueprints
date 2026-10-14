@@ -1,7 +1,7 @@
 /**
  * Bundled blueprint: task-management.
  *
- * The canonical first blueprint (design doc Appendix A). Structured task
+ * The canonical first blueprint. Structured task
  * tracking, shareable across sessions, agents, and users. Demonstrates the
  * full contract: a HYBRID-indexed schema, a data-plane-only profile that
  * passes the CLI scope gate, a service principal, and deterministic seed

@@ -56,7 +56,9 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   structure) — ADRs, designs, references, runbooks, and post-mortems as
   **documents**; controls, conventions, gotchas, and a glossary as **records** —
   linked into a **cross-surface** knowledge graph, with hybrid search + grounded
-  `rag_ask`, plus a private `memory` tier for per-principal working memory; see
+  `rag_ask`, plus a private `memory` tier for per-principal working memory and a
+  store-only `candidate` schema that holds proposed memories until they are verified
+  (it is never indexed, so no search or grounded answer can return one); see
   [`guides/agentic-sdlc.md`](guides/agentic-sdlc.md) and the drop-in agent prompt
   [`prompts/agentic-sdlc-agent.md`](prompts/agentic-sdlc-agent.md)),
   `second-brain`, and `clinical-intake` (the PHI/sensitive-field exemplar).
@@ -67,6 +69,10 @@ This is the format *contract* reference. For the authoring *workflow*
 (`init` → `validate` → `plan` → `bootstrap`), see
 [`@vectros-ai/cli`'s AUTHORING.md](https://www.npmjs.com/package/@vectros-ai/cli).
 
+`fields[]` describes the record's payload. `externalId` is the record's built-in identifier,
+and `userId` and `scopes` are its ownership keys; the platform rejects all three as payload
+keys on a record or document, so never declare one as a field (the platform reserves `partnerUserId` too).
+
 A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
 `required`, `searchable`, `filterable`, `enumValues`, `description`):
 
@@ -76,15 +82,16 @@ A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
   `required`. Strict — an unknown rule key is an authoring error.
 - **`renderHints`** — `label` / `widget` (`text|textarea|select|date|checkbox`) /
   `order` / `section` / `helpText` / `displayField` (mark the record's headline
-  column — at most one per schema). Authored per-field; the CLI loader pivots
+  column — mark at most one per schema; the platform does not enforce one, and the reference UI uses the first by `order`). Authored per-field; the CLI loader pivots
   them into the schema-level keyed map the platform expects.
 - **`sensitive`** (boolean, default false) — marks a field as PHI/PII. The
   platform redacts it from logs/audit/errors **at write time** (destroyed before
   the audit snapshot — not reversible masking), blind-indexes it for lookups,
   **excludes it from the search index**, and masks it in responses unless the token
   carries the `s` reveal scope for the record type. The bundled `clinical-intake`
-  blueprint is the exemplar. (Marking a field both `sensitive` and `searchable` is
-  contradictory — a sensitive field never enters the search index.)
+  blueprint is the exemplar. (A field that is both `sensitive` and `searchable` is
+  refused: the platform answers `400` at schema creation, and `validate`/`plan` do not
+  catch it, so never declare the pair.)
 
 A schema additionally accepts:
 
@@ -105,9 +112,10 @@ A schema additionally accepts:
   - **equality (default) vs. `rangeEnabled`** — equality for ids/foreign keys/
     status enums/categories; `rangeEnabled` (ordered `from`/`to`/`prefix`, billed
     at the range rate) for values you query as an order (**dates, sequences,
-    scores, versions**). Range/prefix order is lexical, so ISO-8601 dates sort
-    correctly but an ordinal enum (`low…urgent`) would sort alphabetically — leave
-    those as equality. Single-field lookups only — a composite is an exact-match
+    scores, versions**). Order follows the declared `fieldType`: `number` and `date`
+    fields order numerically and chronologically, while a string-typed field orders
+    lexically (`1.10` before `1.9`) and an ordinal enum (`low…urgent`) alphabetically —
+    leave those as equality. Single-field lookups only — a composite is an exact-match
     index over its fields; declare the range lookup separately.
   - **7-slot budget** — a schema has 7 fast equality-lookup slots (ownership ids +
     `externalId` ride their own; `rangeEnabled` lookups use a row, not a slot, so
@@ -186,11 +194,13 @@ A blueprint may also declare top-level **`roles`** — a map of `roleId` → ord
 scope clauses (each an `allowedActions` list with an optional `dataScope`). Unlike
 `accessProfile` (which scopes the service-principal key `bootstrap` mints), roles
 are reusable, identity-agnostic rules you bind to a principal *after* bootstrap with
-`vectros access grant --principal <p> --role <roleId>`. `bootstrap` provisions the
+`vectros access grant --principal <p> --context <c> --role <roleId>`. `bootstrap` provisions the
 declared roles in the context but binds them to no one. The bundled `agentic-sdlc`
 ships an `editor` role for this — join your own user to the context so you can
 browse and curate the knowledge base in the app. Role clauses pass the same
-data-plane scope gate as `accessProfile`.
+data-plane scope gate as `accessProfile`. A role whose `dataScope` uses `${{ self.* }}`,
+`${{ under.self.* }}` or `${{ member.* }}` cannot be composed into a trigger's grant (see
+`triggers` below).
 
 Instead of an inline `allowedActions` clause, `accessProfile` may declare
 **`roleIds`** — a list of one or more roles this SAME blueprint declares in
@@ -266,13 +276,18 @@ clause still needs *before* adding it.
 
 **`capabilities`** — a list of platform capability names (distinct from the
 schema-level `capabilities` above), e.g. `capabilities: ['member-lifecycle']`.
+It goes in exactly three places: on `accessProfile`, on a clause of a role under
+`roles`, and on a `triggers` entry. A top-level `capabilities:` is rejected, and an
+`accessProfile` or trigger entry that composes roles through `roleIds` carries none of
+its own, so author them on the referenced role's clause.
 This package validates the SHAPE only (non-blank, no duplicates, lowercase
 kebab-case, no `'*'`) — it deliberately does not know which names are actually
 grantable, since that set is a platform property. **This field parses and
 validates; it does not, by itself, cause anything to be granted.** Whether it
-has any effect depends entirely on whether the tool applying your blueprint
-(e.g. `@vectros-ai/cli`) reads and forwards it — check that tool's own release
-notes before relying on it.
+has any effect depends on the tool applying your blueprint. `@vectros-ai/cli`
+forwards it as the platform's `granted_capabilities`, and its scope gate admits only
+`member-lifecycle` and `delegate-principal-stamp`; any other name is refused before anything
+is created.
 
 A blueprint may declare a top-level **`scripts`** — a map of script name → declaration — carrying
 the source a trigger's `scriptRef` runs. Without it a blueprint can *name* a script but not *ship*
@@ -286,7 +301,6 @@ schemas:
     displayName: Intake
     capabilities: { triggersEnabled: true }
     fields:
-      - { fieldId: externalId, fieldType: string }
       - { fieldId: status, fieldType: string, inline: true }
 scripts:
   notify-assignee:
@@ -346,7 +360,9 @@ other credential's, and review it the same way. Applied per-context like `roles`
 not in the bootstrap phase. A grant naming a control-plane resource (`keys`, `profiles`, `users`,
 `app-contexts`, `access-log`, `scripts`, any op) or the bare wildcard `*` additionally requires the
 applying credential to hold the `trigger-control-plane-grant` capability — no bundled blueprint
-declares one, and this is refused by default. Each entry:
+declares one, and this is refused by default. `@vectros-ai/cli` goes further: its scope gate
+admits data-plane grants only, so `vectros bootstrap` and `vectros blueprint apply` refuse
+such a trigger whatever the credential holds. Each entry:
 
 ```yaml
 schemas:
@@ -355,7 +371,6 @@ schemas:
     # A schema fires triggers only when it opts in.
     capabilities: { triggersEnabled: true }
     fields:
-      - { fieldId: externalId, fieldType: string }
       # `inline` is what makes a field projectable into a trigger script.
       - { fieldId: status, fieldType: string, inline: true }
 roles:
@@ -422,17 +437,28 @@ triggers:
 - `manifest` (optional) — a list of host-object verbs (e.g. `records.get`) further narrowing what
   the script may call, on top of whatever the grant above would otherwise permit. Never widens it.
 - `dataScope` values may use `${{ input.<dim> }}` — resolves to a stamped dimension on the record
-  whose change fired the trigger, the same "confine to the acting record's own identity" pattern
-  `${{ self.* }}` gives the calling principal. This placeholder is valid **only** inside a
+  whose change fired the trigger. This placeholder is valid **only** inside a
   `triggers[<name>].dataScope` value; it is rejected everywhere `roles`/`accessProfile` accept a
-  placeholder.
+  placeholder. The reverse also holds: `${{ self.* }}`, `${{ under.self.* }}` and `${{ member.* }}`
+  resolve against the trigger's own principal, not yours, so they are refused in a trigger's grant —
+  in an inline `dataScope`, and in the `dataScope` of any role its `roleIds` composes. Confine a
+  trigger's grant with `${{ input.* }}` or literal values; a role that uses `self`/`member`
+  placeholders is fine for an `accessProfile` but cannot be a trigger's grant.
 
-**Removing a trigger de-provisions it.** Triggers are the one thing an apply reconciles by
-*absence* as well as presence: delete an entry from `triggers` and re-apply, and its rule and the
-access profile behind it are deleted, so a trigger you removed cannot keep acting under a grant
-that outlived it. Its service principal is kept, so re-adding the same trigger later reattaches to
-the same identity rather than creating a second one. Triggers created outside this blueprint are
-never touched — ownership is established from the trigger's own service principal, not its name.
+**Removing a trigger de-provisions it, on `vectros bootstrap` and on `vectros blueprint apply
+--prune`.** Triggers are the one thing an apply reconciles by *absence* as well as presence:
+delete an entry from `triggers` and re-run `vectros bootstrap`, and its rule and the access
+profile behind it are deleted, so a trigger you removed cannot keep acting under a grant that
+outlived it. `vectros blueprint apply` deletes nothing unless you pass `--prune`; without it a
+removed trigger stays live and the command says so. Its service principal is kept, so re-adding
+the same trigger later reattaches to the same identity rather than creating a second one. Only a
+trigger this blueprint created is removed: its stored `provisionedBy` marker must equal the
+blueprint's `name`, and its service principal must be the one this blueprint would have created
+for a trigger of that name. Triggers created outside this blueprint, another blueprint's
+triggers, and triggers with no marker are never touched. Both checks read stored markers, not
+verified identities, and the name comes from the blueprint file, so a file that reuses another
+blueprint's `name` and omits some of its triggers removes them. Keep each blueprint's `name`
+unique.
 Nothing else a blueprint declares is ever deleted by removing it: drop a `schemas` entry and the
 schema (and its records) stay, drop a `roles` entry and the role stays, since either could be in
 use by something this blueprint cannot see.
@@ -463,8 +489,11 @@ mechanism.
 A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
 audience, contextId, subClaim?, emailClaim?, userinfoUri?, restrictedToDomain?, selfSignupPolicies?, capturedClaims? }`.
-`jwksUri` and, when set, `userinfoUri` must be `https://` URLs — the platform rejects an `http://` value
-at apply time. `restrictedToDomain` names a domain already verified for your account (verified once, in
+`issuer`, `jwksUri` and, when set, `userinfoUri` must be `https://` URLs in printable ASCII whose
+host is only letters, digits, dots and dashes with an optional port: no userinfo (`@`), percent-encoding,
+bracketed IPv6 literal or non-ASCII host (write an internationalized domain in its punycode `xn--` form).
+This package rejects any other value when the blueprint is parsed, validated or planned, before an
+apply starts. `restrictedToDomain` names a domain already verified for your account (verified once, in
 the developer portal) and is written as a lowercase DNS name such as `acme.com`, never a URL: it scopes
 the registration to that domain — a token matches only when its `hd` claim equals it. Google Workspace emits
 `hd` natively; other identity providers need a claims-mapping rule that emits a claim named exactly `hd`, and
@@ -482,8 +511,10 @@ provider: `vectros bootstrap` or `vectros blueprint apply` (`@vectros-ai/cli` 0.
 `roles` (applied under a per-context token), issuers are applied in the loader's
 **bootstrap-token phase**, alongside app-context/service-principal creation —
 tenant-wide provisioning config that needs the bootstrap credential's owner-only
-authority, not an ordinary context-scoped one. `(issuer, audience)` must be
-globally unique across the tenant — use a distinct `audience` per environment/
+authority, not an ordinary context-scoped one. An `(issuer, audience)` pair
+is claimed platform-wide, so it must be unique across all accounts, not only yours (scoped to
+the domain when `restrictedToDomain` is set; a pair without a domain is claimed when you verify it,
+and a collision surfaces there) — use a distinct `audience` per environment/
 context sharing one IdP account.
 
 Each entry's **`contextId` must equal the blueprint's own `contextId`**. An issuer
@@ -507,10 +538,10 @@ on a profile — and declaring a name no issuer captures simply never fills. A p
 fills once, the first time a sign-in for that principal can supply a value (for an invited member,
 not until they accept and sign in), and never updates again; editing the list therefore affects only
 profiles not yet filled, and re-applying a blueprint does not re-project existing ones. Omit to leave
-the context's declaration unchanged, or declare an empty list to disable future projection.
-**The declaration takes effect when the app context is CREATED.** Re-applying a blueprint against a
-context that already exists does not change it, in either direction — a declared list is not
-applied and an empty list does not disable. Change an existing context's declaration through the
+the context's declaration unchanged; an empty list declares that nothing is projected.
+**The declaration takes effect only when the app context is CREATED.** Re-applying a blueprint against a
+context that already exists does not change it, in either direction — an edited or newly declared list is not
+applied and an empty list does not disable projection. Change an existing context's declaration through the
 platform API instead. Like
 `issuers`, it applies in the **bootstrap-token phase** — setting it needs the platform provisioning
 capability, which only that phase's credential carries.
@@ -526,14 +557,17 @@ blueprint's own `contextId` by default**.
   `_`/`-`. A closed set of words is rejected as reserved (`user`, `record`, `document`,
   `entity`, `self`, `tenant`, `context`, `scope`, `versions`, `lookup`) — `org`/`client`
   are NOT in that set: they're reserved namespace names, not built-ins, registered the
-  same way as any other. They already exist tenant-wide in every account at
-  `specificityRank` 1000/2000 (below); a context-owned registration needs a different
-  rank, and shadows the tenant-wide one for this context's own callers.
+  same way as any other. Signup does not register them: an account has `org` and `client`
+  only once it registers them (for example by declaring them here). Accounts created before
+  signup stopped registering them may still hold the rows it made, at `specificityRank` 1000 (`org`)
+  and 2000 (`client`); a rank must be unique across the account, so a registration of
+  yours needs a different rank wherever those rows exist. A context-owned registration
+  shadows a tenant-wide one of the same name for this context's own callers.
 - `specificityRank` — an integer `0..1_000_000`, this namespace's position in the
   account's specificity order (breaks ties when a caller holds two scope dimensions
   at once). Must be unique among this blueprint's own namespaces; the platform is the
   only party that can see the rest of the account's registrations (including `org`=
-  1000 and `client`=2000), so a collision with those or another blueprint's namespace
+  1000 and `client`=2000 where an account holds them), so a collision with those or another blueprint's namespace
   still surfaces at apply, same as any other non-idempotent-registration collision.
 - `entityBacked` (optional) — when `true`, every value in this namespace must resolve
   to an existing identity entity; when `false`/omitted, values are free-form strings
@@ -586,13 +620,18 @@ owned by a declared `team` identity:
 identityOverrides: { "scope:org": "${{ identities.team }}" }
 ```
 
-Resolution is its own creds-bearing pass, **earlier than either loader phase**
-(the reason `identities` is deliberately absent from `BLUEPRINT_FIELD_PHASES`
-below): every *declared* identity is ensured to exist — tenant-wide, under the
-bootstrap credential, the same category as `servicePrincipal` — whether or not
-anything in the blueprint actually references it, and every `${{
-identities.<name> }}` token is then substituted with the resolved principal's
-bare (unprefixed) id before the bootstrap/in-context phases ever run. A `user`
+Resolution is its own creds-bearing pass, between the loader's two stages (the reason
+`identities` is deliberately absent from `BLUEPRINT_FIELD_PHASES` below). It runs after the
+app context, the service principal and the declared `namespaces` exist, because an identity
+in a namespace the blueprint declares needs that namespace registered first, and before
+issuers and the in-context load (schemas, access profile, key, seed). Every *declared*
+identity is ensured to exist, under the bootstrap credential, whether or not anything in
+the blueprint actually references it. Where each row lives follows its namespace: a `user`
+(like `servicePrincipal`), and an entity in a tenant-wide namespace, is tenant-placed and
+survives `context destroy`; an entity in a namespace the blueprint declares (context-owned
+by default) is placed in the blueprint's context and erased with it. Every
+`${{ identities.<name> }}` token is then substituted with the resolved principal's bare
+(unprefixed) id before those later stages run. A `user`
 identity defaults to `HUMAN` (the blueprint's own `servicePrincipal` is the
 separate SERVICE credential).
 
@@ -619,8 +658,9 @@ omits them parses and provisions exactly as before.
 
 ## Authoring
 
-Drop a `blueprints/<name>.ts` exporting a `Blueprint` default, register it in
-`src/index.ts`. The bundled-library test guards that every blueprint parses;
+To add a bundled blueprint to this package's source, drop a `src/blueprints/<name>.ts`
+exporting a `Blueprint` default, import it in `src/index.ts` and add it to `BUNDLED_BLUEPRINTS`.
+The bundled-library test guards that every blueprint parses;
 the CLI's scope-gate test guards that every bundled blueprint stays
 data-plane-only. The bundled `task-management` blueprint is the
 heavily-commented exemplar — copy it to start.
@@ -641,7 +681,9 @@ link to another record. The blueprint format carries these extra authoring keys:
   (`org`, `client`, or one you registered). The same `typeName` can exist on more
   than one surface, so this disambiguates which lookup resolves the link. The value
   set is data-driven (namespaces are tenant-defined), so it is a free string, not a
-  closed enum. (Omitting it 400s at `createSchema` — "requires targetSurface".)
+  closed enum. (A reference field without it is rejected when the blueprint is parsed, and so is
+  `entity`, which names a schema's bind surface rather than a target: name the entity's namespace
+  instead.)
 - `targetField` (optional) — the field on the target used to resolve the link; defaults
   (platform side) to the target's `externalId` / lookup key when omitted. Must name a
   **unique** lookup on the target type.

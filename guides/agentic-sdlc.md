@@ -7,7 +7,7 @@ split by content vs structure — `decision` (ADRs), `design`, `reference`,
 `control`, `convention`, `gotcha`, and `term` (glossary) as **records** (the typed
 fields are the artifact) — linked into a **cross-surface knowledge graph** and
 recalled by hybrid search + grounded `rag_ask`, plus a private **`memory`** tier
-(§8) for the per-principal working memory an agent keeps for itself. This guide
+(§5) for the per-principal working memory an agent keeps for itself. This guide
 takes you from bootstrap to a populated, queryable KB, and to wiring an agent to
 use it day-to-day.
 
@@ -23,7 +23,7 @@ use it day-to-day.
   `runbook`, `postmortem` — are **documents** (the markdown body is searched +
   answered over). The structured artifacts — `control`, `convention`, `gotcha`,
   `term` — are **records** (typed fields, exact-queryable). The tenth, **`memory`**
-  (§8), is a per-principal private record type — an agent's own working memory,
+  (§5), is a per-principal private record type — an agent's own working memory,
   isolated by the `member` role. The eleventh, **`candidate`** (§5), holds memories
   an agent has *proposed* but not yet verified; it is **store-only**, so an
   unverified claim can never surface in search.

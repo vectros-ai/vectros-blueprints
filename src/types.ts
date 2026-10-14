@@ -225,7 +225,7 @@ const RenderHintsSchema = z
     helpText: z.string().optional(),
     // Marks this field as the record's headline (display) field — the linked
     // primary column in the records list + the title on the detail view. At most
-    // one per schema (the platform takes the first by order). Format passthrough →
+    // one per schema (the platform stores the hint and does not enforce one; the reference UI uses the first by order). Format passthrough →
     // SchemaRequest.renderHints[fieldId].displayField.
     displayField: z.boolean().optional(),
   })
@@ -869,7 +869,7 @@ const BlueprintFragmentsSchema = z.record(
 // blueprint and bound to principals via `vectros access grant --role <id>`.
 // DISTINCT from `accessProfile` (the least-privilege scope the bootstrap mints
 // for the blueprint's own service-principal key). Roles are identity-agnostic,
-// reusable, multi-clause rules (architecture §6).
+// reusable, multi-clause rules.
 //
 // The KEY (roleId) is safeDisplayString'd via the two-argument `z.record(keySchema,
 // valueSchema)` form: `buildPlan`'s role step renders roleId raw (`role '${roleId}' (...)`),
@@ -1446,10 +1446,11 @@ const BlueprintIssuerSchema = z
  * `org`/`client` are reserved namespace names, not built-ins — registered
  * the same way as any other name, with no permanent exclusion. A
  * context-owned `org` registration is exactly as valid as a context-owned
- * `team` registration. They DO already exist tenant-wide in every account
- * (`specificityRank` 1000/2000, below) — a context-owned registration of
- * either needs a different rank, and shadows the tenant-wide one for this
- * context's own callers.
+ * `team` registration. Signup does not register them: an account has them
+ * only once it registers them. Accounts created before that change may
+ * still hold tenant-wide rows at `specificityRank` 1000/2000 (below) — a
+ * context-owned registration of either needs a rank the account does not
+ * already hold, and shadows a tenant-wide one for this context's own callers.
  *
  * **Registered OWNED by this blueprint's own `contextId` by default** — a
  * blueprint applies under the CLI's bootstrap credential, and the platform's
@@ -3157,7 +3158,8 @@ export const BlueprintSchema = z
      * alongside app-context/service-principal creation and issuers, BEFORE
      * schemas/seed (an `entityBacked` namespace's entities, and an
      * `allowedSurfaces: ['entity']` schema, both need the registration to
-     * already exist). `org`/`client` need no entry — they exist already.
+     * already exist). `org`/`client` are registered the same way as any other
+     * namespace: signup does not register them, so declare an entry for each you use.
      */
     namespaces: z.array(BlueprintNamespaceSchema).optional(),
     /**

@@ -10,21 +10,20 @@
  * or an unresolved token. It is the FORMAT half of the feature: pure,
  * dependency-free (no node, no IO); the CLI owns YAML parsing + `--set`/`--values`.
  *
- * Two tiers — DO NOT conflate (spec §1):
+ * Two tiers — DO NOT conflate:
  *   - install-time substitution (HERE): `${{ inputs.x }}`, `${{ vectros.* }}`,
  *     resolved by the trusted loader before any API call.
  *   - the runtime sentinel `$self` (agent-memory): a literal value the platform
  *     resolves per-principal at use. This resolver MUST leave `$self` and ANY
  *     `$`-prefixed value untouched — it only ever matches the `${{ … }}` form.
  *
- * Security (spec §3): pure string replacement, no eval/template engine → no
+ * Security: pure string replacement, no eval/template engine → no
  * template injection. The scope gate (the CLI trust boundary) runs on the
  * RESOLVED document, so a parameter cannot smuggle a control-plane scope past
- * it. Built-ins are intentionally tiny (`context`, `suffix`) — see the
- * auto-binding invariant in the spec §4: data-record externalIds are bound to
- * `(tenant, context[, identity])` server-side, so they need no namespace; only
- * tenant-wide service-principal externalIds do, which is what `vectros.suffix`
- * is for.
+ * it. Built-ins are intentionally tiny (`context`, `suffix`) — data-record
+ * externalIds are bound to `(tenant, context[, identity])` server-side, so they
+ * need no namespace; only tenant-wide service-principal externalIds do, which
+ * is what `vectros.suffix` is for.
  */
 import { z } from 'zod';
 import type { BlueprintIssue } from './types.js';
