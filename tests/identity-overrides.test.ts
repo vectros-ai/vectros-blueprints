@@ -54,7 +54,7 @@ test('identityOverrides: ACCEPTS a grammar-valid literal value', () => {
   assert.equal(bp.accessProfile.identityOverrides?.['scope:org'], 'org_acme-1');
 });
 
-// A colon-bearing value used to round-trip clean and 400 at apply (the value
+// A colon-bearing value would otherwise lint clean and 400 at apply (the value
 // becomes an entity id inside a colon-split storage key).
 test('identityOverrides: REJECTS a literal value containing a colon', () => {
   const paths = issuePaths(
@@ -82,12 +82,11 @@ test('identityOverrides: REJECTS a literal value shaped like a placeholder but n
   );
 });
 
-// Found in review: the placeholder-recognition check must match the WHOLE
-// value, not just a substring of it. An unanchored check let a value like
-// this skip the literal grammar entirely, with its colon-bearing suffix
-// intact — exactly the shape the whole change exists to catch. This is the
-// regression pin for that bug (must fail with the anchor removed — verified
-// by hand, see the branch's review notes).
+// The placeholder-recognition check must match the WHOLE value, not just a
+// substring of it. An unanchored check would let a value like this skip the
+// literal grammar entirely, with its colon-bearing suffix intact — exactly the
+// shape this lint exists to catch. This pins the anchoring: it fails if the
+// anchor is removed.
 test('identityOverrides: REJECTS a literal value that merely EMBEDS a well-formed, declared identities token', () => {
   const paths = issuePaths(
     minimal({

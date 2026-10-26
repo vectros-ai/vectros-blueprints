@@ -233,9 +233,8 @@ test('SHOWCASE: agentic-sdlc links a convention to its decision via a typed, cro
     (lf) => (typeof lf === 'string' ? lf : lf.fieldName) === 'establishedBy',
   );
   assert.ok(isLookup, 'establishedBy is an equality lookup');
-  // (no seed-resolution sub-case here — agentic-sdlc ships with no seed data, unlike the
-  // blueprint this test previously showcased; the schema-shape assertions above are the
-  // durable coverage that matters.)
+  // (no seed-resolution sub-case here — agentic-sdlc ships with no seed data; the
+  // schema-shape assertions above are the coverage that matters.)
 });
 
 test('GUARD: no bundled schema declares a reserved identifier as a lookup field', () => {
@@ -353,9 +352,9 @@ test('agentic-sdlc: 11 schemas split content (documents) vs structure (records) 
   assert.equal(searchable.length, 10, 'exactly one schema is non-searchable');
   assert.equal(byType.get('candidate')!.indexMode, 'NONE',
     'candidate MUST be store-only — unverified proposals must never be reachable by search');
-  // The retired types from earlier drafts are gone.
+  // The retired types are not schemas of this blueprint.
   for (const gone of ['handoff', 'incident', 'doc']) {
-    assert.ok(!byType.has(gone), `${gone} should no longer be a schema`);
+    assert.ok(!byType.has(gone), `${gone} should not be a schema`);
   }
 });
 
@@ -935,18 +934,16 @@ test('GUARD: any lookup sortBy names a platform timestamp or a declared, order-b
   //   2. It must have a meaningful order: `array` and `object` are rejected outright.
   // The third — a sortBy must never name a `sensitive` field, whose plaintext would land in
   // a GSI sort key — is enforced by 'GUARD: a sensitive field is never searchable, never
-  // range/sort-indexed' above, which owns the whole sensitive surface. Named here because
-  // this comment previously read as if it enumerated the complete rule set, which is how a
-  // reader concludes a rule is unguarded when it is merely guarded elsewhere.
+  // range/sort-indexed' above, which owns the whole sensitive surface. Named here so a
+  // reader does not conclude a rule is unguarded when it is merely guarded elsewhere.
   //
   // ⚠️ Both assertions below are VACUOUS against today's corpus: the only bundled sortBy is
   // `lastUpdated`, which returns at the PLATFORM_TIMESTAMPS check before reaching either.
   // They are forward guards on blueprints not yet written, not evidence about what ships.
   //
-  // The field does NOT need to be `required` — an earlier version of this guard enforced
-  // that, on the belief that sorting by an optional field "silently drops" records lacking
-  // it. That was never true (an equality lookup resolves on the partition key; sortBy only
-  // orders within it), and the platform now gives value-less records their own ordered
+  // The field does NOT need to be `required`: sorting by an optional field does not
+  // "silently drop" records lacking it (an equality lookup resolves on the partition key;
+  // sortBy only orders within it), and the platform gives value-less records their own ordered
   // position ahead of the rest.
   const PLATFORM_TIMESTAMPS = new Set(['createdAt', 'lastUpdated']);
   const UNORDERABLE = new Set(['array', 'object']);
@@ -1246,10 +1243,8 @@ test('composite lookup: a schema with NO composite is unaffected by the allowedS
 
 test('composite lookup: the BUNDLED adoption inventory is exactly one, and enumerated', () => {
   /**
-   * This pin was previously "no bundled blueprint declares one yet" — the negative held while
-   * the format support landed and the content decision was deliberately deferred. That decision
-   * has now been made for ONE schema (`agentic-sdlc.candidate`, over `sessionId` +
-   * `disposition`), so the pin becomes an INVENTORY rather than a prohibition.
+   * Exactly ONE bundled schema adopts a composite lookup (`agentic-sdlc.candidate`, over
+   * `sessionId` + `disposition`), so this pin is an INVENTORY rather than a prohibition.
    *
    * Kept as an exhaustive list on purpose. Each composite costs one of a schema's ten permanently
    * migration-locked lookup declarations, so adoption is a decision that should show up as a diff

@@ -50,9 +50,8 @@ use it day-to-day.
 
 ## 2. Quickstart — install, sign in, provision
 
-Install the public CLI, sign in once (browser), and provision the context + the ten
-schemas + a scoped key (and wire your MCP client). `production` is the default
-environment — add `--env staging` only to target staging.
+Install the public CLI, sign in once (browser), and provision the context + the eleven
+schemas + a scoped key (and wire your MCP client).
 
 **Bash (macOS / Linux / Git Bash):**
 
@@ -327,13 +326,6 @@ crystallize it into a `convention`/`gotcha`/`decision` (a curated type the whole
 team reads). One rule keeps memory honest: **your issue tracker owns work-item
 status; memory owns the context around it** — don't let memory become a shadow
 task board.
-
-> **Coming next — team working memory.** A third tier (the same `memory` type
-> shared at a group scope, so teammates' agents read and write a common working
-> layer) is a planned addition. It is intentionally not in this version while the
-> platform's ownership axis for shared scopes is being finalized — so this
-> blueprint doesn't bake a shape that is about to change. When it lands, it's the
-> same `memory` type with a shared write scope, not a new schema.
 
 **Structure axes** on every memory: `kind` (`user`/`feedback`/`project`/
 `reference`/`observation`), `area` (the same vocabulary as the curated types),

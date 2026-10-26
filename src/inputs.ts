@@ -131,14 +131,17 @@ const INNER_REF_RE = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
  *
  * `member` joins the set for the same reason: `${{ member.scope.<ns> }}`
  * (and its `:<level>` selector form) is a runtime per-membership placeholder,
- * resolved server-side per request — never at install time. Found in review:
- * before this, `member.*` had no deferred entry, so a role's `dataScope`
- * value using it would fail install-time resolution outright (it fails the
- * flat two-segment `INNER_REF_RE`/`WHOLE_TOKEN_RE` shape and every
- * non-deferred namespace is checked against exactly that), not just escape
- * the placement lint below.
+ * resolved server-side per request — never at install time. Without a
+ * deferred entry, a role's `dataScope` value using `member.*` would fail
+ * install-time resolution outright (it fails the flat two-segment
+ * `INNER_REF_RE`/`WHOLE_TOKEN_RE` shape and every non-deferred namespace is
+ * checked against exactly that), not just escape the placement lint below.
+ *
+ * `input` joins the set the same way: `${{ input.userId }}` / `${{ input.scope.<ns> }}` is the
+ * trigger-firing placeholder, resolved by the platform against the record that fires the trigger.
+ * It is a different namespace from the install-time `inputs`.
  */
-const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under', 'member']);
+const DEFERRED_NAMESPACES = new Set(['self', 'identities', 'under', 'member', 'input']);
 
 /**
  * Bare (dot-less) runtime sentinels this install-time resolver must ALSO leave

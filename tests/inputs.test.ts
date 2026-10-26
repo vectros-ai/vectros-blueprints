@@ -13,6 +13,7 @@ import {
   BlueprintInputError,
   deriveSuffix,
 } from '../src/inputs.js';
+import { parseBlueprint } from '../src/types.js';
 
 /** A minimal blueprint-shaped tree with an inputs block + token usages. */
 function doc(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -533,11 +534,10 @@ test('under.*: an N-segment token embedded mid-string is re-emitted verbatim (in
   assert.equal(r.description, 'founder=${{ under.self.userId }} ok');
 });
 
-// Found in review — before `member` joined DEFERRED_NAMESPACES,
-// `${{ member.scope.<ns> }}` had NO deferred entry: it fails the flat two-segment
-// WHOLE_TOKEN_RE/INNER_REF_RE shape every non-deferred namespace is checked against, so it would
-// have failed install-time resolution outright as a "malformed reference" rather than surviving to
-// reach the server. This is the member.* mirror of the self.*/under.* tests just above.
+// `${{ member.scope.<ns> }}` needs a DEFERRED_NAMESPACES entry: it fails the flat two-segment
+// WHOLE_TOKEN_RE/INNER_REF_RE shape every non-deferred namespace is checked against, so without
+// one it would fail install-time resolution outright as a "malformed reference" rather than
+// surviving to reach the server. This is the member.* mirror of the self.*/under.* tests just above.
 
 test('member.*: a whole-value ${{ member.scope.team }} token is left literal', () => {
   const r = resolved(
@@ -608,3 +608,91 @@ test('escape form still works for the new N-segment shape: $${{ self.scope.org }
   const r = resolved(doc({ description: 'literal: $${{ self.scope.org }}' }));
   assert.equal(r.description, 'literal: ${{ self.scope.org }}');
 });
+
+// ── ${{ input.* }}: the trigger-firing placeholder is left literal for the platform ──────────────
+// `input.*` is resolved by the platform against the record that fires a trigger, so the install-time
+// resolver must pass it through exactly as it passes `self.*`. These tests drive the RESOLVER; the
+// placement lint (triggers.test.ts) only ever saw the already-parsed tree.
+
+test('input.*: a three-segment ${{ input.scope.org }} token in a trigger dataScope is left literal', () => {
+  const r = resolved(
+    doc({
+      triggers: {
+        t: {
+          firingSource: { schemaName: 'intake', event: 'CREATE' },
+          scriptRef: { name: 'notify', version: 'latest' },
+          fields: [],
+          allowedActions: ['records:u'],
+          dataScope: { 'scope:org': ['${{ input.scope.org }}'] },
+        },
+      },
+    }),
+  );
+  assert.equal(r.triggers.t.dataScope['scope:org'][0], '${{ input.scope.org }}');
+});
+
+test('input.*: the flat ${{ input.userId }} token is left literal', () => {
+  const r = resolved(
+    doc({ triggers: { t: { dataScope: { userId: ['${{ input.userId }}'] } } } }),
+  );
+  assert.equal(r.triggers.t.dataScope.userId[0], '${{ input.userId }}');
+});
+
+test('input.*: an embedded token mid-string is re-emitted verbatim (interpolate path)', () => {
+  const r = resolved(doc({ description: 'fired by ${{ input.scope.org }} ok' }));
+  assert.equal(r.description, 'fired by ${{ input.scope.org }} ok');
+});
+
+test('input.* coexists with inputs: inputs resolve, input is preserved, inputs block stripped', () => {
+  const r = resolved(
+    doc({
+      inputs: { team: { type: 'string' } },
+      description: 'team ${{ inputs.team }} fired by ${{ input.userId }}',
+    }),
+    { team: 'Acme' },
+  );
+  assert.equal(r.description, 'team Acme fired by ${{ input.userId }}');
+  assert.equal('inputs' in r, false);
+});
+
+test('input.*: a resolved trigger blueprint still parses with the token intact (resolver then parseBlueprint)', () => {
+  const raw = doc({
+    schemas: [
+      { typeName: 'intake', displayName: 'Intake', fields: [], capabilities: { triggersEnabled: true } },
+    ],
+    triggers: {
+      t: {
+        firingSource: { schemaName: 'intake', event: 'CREATE' },
+        scriptRef: { name: 'notify', version: '3' },
+        fields: [],
+        allowedActions: ['records:u'],
+        dataScope: { 'scope:org': ['${{ input.scope.org }}'] },
+      },
+    },
+  });
+  const bp = parseBlueprint(resolveBlueprintInputs(raw, {}));
+  assert.deepEqual(bp.triggers?.t.dataScope, { 'scope:org': ['${{ input.scope.org }}'] });
+});
+
+test('input.*: the escape $${{ input.scope.org }} resolves to the literal ${{ input.scope.org }}', () => {
+  const r = resolved(doc({ description: 'literal: $${{ input.scope.org }}' }));
+  assert.equal(r.description, 'literal: ${{ input.scope.org }}');
+});
+
+test('input.*: outside a trigger dataScope the resolver passes it and parseBlueprint rejects it', () => {
+  for (const extra of [
+    { roles: { r: [{ allowedActions: ['records:r'], dataScope: { userId: ['${{ input.userId }}'] } }] } },
+    { description: 'fired by ${{ input.userId }}' },
+  ]) {
+    const raw = doc(extra);
+    assert.doesNotThrow(() => resolveBlueprintInputs(raw, {}));
+    assert.throws(() => parseBlueprint(resolveBlueprintInputs(raw, {})), /input\.\*/);
+  }
+});
+
+test('input: a malformed reference is still an error (bare, empty segment, look-alike namespaces)', () => {
+  for (const bad of ['${{ input }}', '${{ input. }}', '${{ input.a-b }}', '${{ inputx.userId }}', '${{ INPUT.userId }}']) {
+    assert.throws(() => resolved(doc({ description: bad })), BlueprintInputError, bad);
+  }
+});
+

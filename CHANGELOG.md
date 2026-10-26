@@ -3,6 +3,24 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.20.3 — 2026-10-25
+
+### Fixed
+
+- **A trigger's `dataScope` can use `${{ input.userId }}` and `${{ input.scope.<namespace> }}`.** The platform resolves these
+  against the record that fires the trigger, and a file blueprint that uses them now passes install-time resolution and validation.
+
+### Changed
+
+- **The comments in the shipped code describe the code as it is today.** Behaviour is unchanged.
+
+### Documentation
+
+- **The README describes the `inputs:` block and the input and identity-resolution exports.** It states that a trigger's
+  `scriptRef.version` is a string (`'3'`) or `"latest"`, and that `getBlueprint` returns `undefined` for an unknown name.
+- **The agentic-sdlc guide counts eleven schemas, and the agent prompt says a `429` `BALANCE_BUSY` or a `503`
+  `BALANCE_UNAVAILABLE` from `rag_ask` is not a shortage and to retry.**
+
 ## 0.20.2 — 2026-10-12
 
 ### Documentation

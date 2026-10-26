@@ -152,17 +152,16 @@ test('schemas[].scopes: REJECTS a 3rd entry (structural .max(2))', () => {
   assert.ok(paths.some((p) => p.startsWith('schemas[0].scopes')), `expected a cap issue, got ${JSON.stringify(paths)}`);
 });
 
-// seed[].scopes previously had NO .max(2) despite its own docstring saying '≤2' —
-// this pins the fix.
-test('seed[].scopes: REJECTS a 3rd entry (structural .max(2), previously unenforced)', () => {
+// seed[].scopes carries a structural .max(2), matching its own docstring's '≤2'.
+test('seed[].scopes: REJECTS a 3rd entry (structural .max(2))', () => {
   const paths = issuePaths(withSeedScopes(['org:a', 'client:b', 'team:c']));
   assert.ok(paths.some((p) => p.startsWith('seed[0].scopes')), `expected a cap issue, got ${JSON.stringify(paths)}`);
 });
 
 // ── one value per namespace ─────────────────────────────────────────────────
 //
-// Found in review: the platform's own authored-scopes validation rejects a namespace
-// repeated with a conflicting value — this array previously accepted it.
+// The platform's own authored-scopes validation rejects a namespace
+// repeated with a conflicting value, so this array must reject it too.
 
 test('schemas[].scopes: REJECTS the same namespace twice with DIFFERENT values', () => {
   const paths = issuePaths(withSchemaScopes(['org:a', 'org:b']));

@@ -117,9 +117,9 @@ function safeDisplayString<T extends z.ZodString>(base: T) {
  * below), and its AUTHORITY (the substring between `://` and the first `/`, `?`, or `#`) to
  * match `[A-Za-z0-9.-]+(:\d+)?` — letters, digits, dot, dash, and an optional numeric port.
  *
- * WHY A GRAMMAR ON THE AUTHORITY, NOT A CALL TO `new URL()` FOLLOWED BY MORE CHECKS: an earlier
- * version of this function parsed the value with `new URL()` and checked the RESULT — that
- * approach has two bypasses `new URL()` itself creates, both closed by never calling it at all:
+ * WHY A GRAMMAR ON THE AUTHORITY, NOT A CALL TO `new URL()` FOLLOWED BY MORE CHECKS: parsing the
+ * value with `new URL()` and checking the RESULT has two bypasses `new URL()` itself creates,
+ * both closed by never calling it at all:
  *
  *   1. HOMOGLYPH-VIA-PERCENT-ENCODING: `new URL()` percent-DECODES the authority as part of
  *      parsing, then IDNA/punycode-normalizes the decoded host. So `https://%D0%B0pple.example/`
@@ -184,9 +184,8 @@ function safeUrlString<T extends z.ZodString>(base: T) {
  * Maximum distinct ownership-scope dimensions a record can carry — the
  * platform's own two-scope-pair capacity. ONE constant for every place that
  * number is spelled — the schema-level `.max()` caps below AND
- * `lintIdentityOverrides`'s own cap check — found in review after a widening
- * left one of three "2"s as a literal that a future bound change would
- * silently miss.
+ * `lintIdentityOverrides`'s own cap check — so a future bound change cannot
+ * silently miss one of the places the number appears.
  */
 const MAX_SCOPE_DIMENSIONS = 2;
 
@@ -488,7 +487,7 @@ const BlueprintSchemaSchema = z
     // (`lintNamespacedScopeArrays`) — this `.max(MAX_SCOPE_DIMENSIONS)` is
     // only the shape-level cap, not the grammar check.
     // With a scoped token these must be consistent with the profile's dataScope
-    // (a cross-consistency lint is deferred to the lint slice).
+    // (the lints here check each entry's grammar only, not that consistency).
     userId: z.string().min(1).optional(),
     scopes: z.array(z.string().min(1)).max(MAX_SCOPE_DIMENSIONS).optional(),
     // The id of an existing schema this one is a CUSTOMIZATION of, when a schema
@@ -1172,8 +1171,8 @@ const IdentityDeclSchema = z
     kind: IdentityKindSchema,
     // safeDisplayString: `@vectros-ai/cli`'s `runBootstrapCli` and `blueprint plan` both print
     // this RAW to stdout ("~ <name> (<kind>) — external id '<externalId>'"), immediately before
-    // the "Apply this plan? [y/N]" confirmation gate itself — the highest-severity gap found in
-    // this pass, since it sits at the confirmation prompt's own disclosure text, not merely
+    // the "Apply this plan? [y/N]" confirmation gate itself — the highest-severity place to
+    // close, since it sits at the confirmation prompt's own disclosure text, not merely
     // somewhere upstream of it. `displayName` is wrapped too though not currently
     // rendered in any preview (defense-in-depth, matching this file's practice for its adjacent
     // sibling fields) — it does reach a platform API payload as an entity's `name`.
@@ -1186,11 +1185,11 @@ const IdentityDeclSchema = z
 // Identity name grammar — MUST mirror the capture group in IDENTITY_REF_RE
 // below (and identities.ts's own IDENTITY_TOKEN_RE, the same pattern
 // duplicated there for its scan/substitute pass over the apply-time tree):
-// a name outside this grammar could previously still be DECLARED (nothing
-// constrained the `identities` block's keys), but could never be REFERENCED
+// a name outside this grammar could never be REFERENCED
 // — `${{ identities.<name> }}`'s own token grammar cannot match it, so
-// `${{ identities.demo-org }}` silently never substituted into a live
-// `scopes:`/dataScope field instead of erroring.
+// `${{ identities.demo-org }}` would silently never substitute into a live
+// `scopes:`/dataScope field instead of erroring. `IdentitiesDeclSchema`
+// therefore rejects such a name at declaration.
 const IDENTITY_NAME_RE = /^[A-Za-z_]\w*$/;
 
 // Optional top-level `identities` block — a map of local name → declaration.
@@ -1729,7 +1728,7 @@ const SeedCommonShape = {
    * seeds resolve a `reference` against (across surfaces: a record seed may
    * reference a document seed by its externalId, and vice versa).
    * `safeDisplayString`: not currently rendered in a plan-preview line (same as this schema's
-   * `typeName` just above until this pass), but the same "costs nothing to close now" standard
+   * `typeName` just above), but the same "costs nothing to close" standard
    * applies — a short caller-supplied id, not free-form prose, so no YAML block-scalar
    * collision risk like `description`'s.
    */
@@ -1780,14 +1779,13 @@ const BlueprintSeedRecordSchema = z.discriminatedUnion('surface', [
 // running on the already-input-resolved doc (the install-time resolver
 // leaves these tokens literal — see inputs.ts).
 //
-// `member.*` joins this lint for the same reason (found in review):
+// `member.*` joins this lint for the same reason:
 // `${{ member.scope.<ns> }}` (and its `:<level>` selector form) is
 // the equivalent runtime per-membership placeholder, resolved server-side —
 // also only meaningful inside a role's dataScope, so a misplaced/typo'd one
-// gets the same teach-by-error here that self/under already got. (inputs.ts's
-// DEFERRED_NAMESPACES gained the matching entry in the same commit, so the
-// token also survives install-time resolution to reach this lint and the
-// server at all.)
+// gets the same teach-by-error here that self/under get. (inputs.ts's
+// DEFERRED_NAMESPACES carries the matching entry, so the token also survives
+// install-time resolution to reach this lint and the server at all.)
 //
 // Two features widened the legal zone further, both PLACEMENT
 // only (see `lintRoleAssumable` below for the narrower per-form grammar
@@ -1924,10 +1922,10 @@ const IDENTITY_REF_RE = /\$\{\{\s*identities\.([A-Za-z_]\w*)\s*\}\}/g;
 // but captures ANYTHING in between (never crossing a literal `}`), so a token
 // whose shape IDENTITY_REF_RE cannot match — dotted property access
 // (`identities.demoOrg.externalId`), a hyphenated/invalid name — is still
-// DETECTED here rather than silently invisible to every check. Before this
-// existed, such a token matched neither this lint nor the apply-time
-// substitution's own (equally strict) regex, so it reached apply-time
-// untouched and landed as a literal, unresolved '${{ ... }}' string in
+// DETECTED here rather than silently invisible to every check. Such a token
+// matches neither IDENTITY_REF_RE nor the apply-time substitution's own
+// (equally strict) regex, so without this pattern it would reach apply-time
+// untouched and land as a literal, unresolved '${{ ... }}' string in
 // whatever ownership/dataScope field it was written into.
 const IDENTITY_REF_LOOSE_RE = /\$\{\{\s*identities\.([^}]*?)\s*\}\}/g;
 
@@ -2025,18 +2023,13 @@ function scopeNamespaceGrammarError(namespace: string): string | null {
 // value IS a placeholder", not "this value CONTAINS one" — an unanchored,
 // substring `.match()` against the same regex let a value like
 // `${{ identities.team }}-x:y` skip the grammar check entirely with its
-// colon-bearing suffix intact, exactly the shape this lint exists to catch
-// (caught in review, confirmed against the code before this comment was
-// written).
+// colon-bearing suffix intact, exactly the shape this lint exists to catch.
 //
-// NOTE this is a narrowing as well as a fix: a value that merely EMBEDS a
-// well-formed token (e.g. that same `-x:y`-suffixed string) is now rejected
-// pre-substitution, where the unanchored form would have waved it through.
+// NOTE the anchoring is strict: a value that merely EMBEDS a well-formed token
+// (e.g. that same `-x:y`-suffixed string) is rejected pre-substitution.
 // Low impact by construction — a scope value is an entity id, so suffixing
 // or prefixing one is not a meaningful authoring pattern, and nothing in this
-// package's bundled blueprints, fixtures, or examples authors that shape —
-// but it IS a behavior change for any external consumer who happened to rely
-// on the (buggy) permissive read.
+// package's bundled blueprints, fixtures, or examples authors that shape.
 const IDENTITY_PLACEHOLDER_WHOLE_RE = new RegExp(`^${IDENTITY_REF_LOOSE_RE.source}$`);
 
 // `accessProfile.identityOverrides` mirrors the platform's FULL
@@ -2112,9 +2105,10 @@ function lintIdentityOverrides(
 // `<namespace>:<value>` strings (split on the FIRST colon, mirroring the
 // platform's own scope-value parsing — splitting on the LAST
 // colon, or limiting the split, would silently REINTERPRET a malformed entry
-// instead of rejecting it), ≤2 entries, currently entirely unvalidated here —
-// the same "lints clean, 400s at apply" gap `lintIdentityOverrides` closes for
-// the map form. The VALUE half may be the documented `${{ identities.<name> }}`
+// instead of rejecting it), ≤2 entries. The field schema checks only the
+// array/string shape and the entry-count cap, so this lint closes the
+// "lints clean, 400s at apply" gap, as `lintIdentityOverrides` does for the
+// map form. The VALUE half may be the documented `${{ identities.<name> }}`
 // token (e.g. `'org:${{ identities.team }}'`, per that field's own comment) —
 // placeholder-aware exactly like `lintIdentityOverrides`, and for the same
 // reason.
@@ -2123,10 +2117,10 @@ function lintIdentityOverrides(
 // carries at most one value per namespace, and the platform's own
 // authored-scopes validation rejects the same shape; an exact repeat (same
 // namespace AND same value) is tolerated as harmless redundancy rather than
-// flagged as a conflict. Found in review: the schema-level `.max()` still
+// flagged as a conflict. The schema-level `.max()` still
 // bounds RAW entry count (not distinct-namespace count), so an exact-repeat
 // entry padding a 3rd slot remains over-strict relative to the platform in
-// that one narrow, adversarial-authoring-only shape — judged not worth
+// that one narrow, adversarial-authoring-only shape — not worth
 // moving the cap out of the schema layer for a shape nothing in this repo's
 // fixtures, seed data, or bundled blueprints authors.
 function lintScopeEntries(
@@ -2638,8 +2632,7 @@ function lintTriggerFields(value: unknown, ctx: z.RefinementCtx): void {
  *    channel, and a restriction is cheap to relax later and breaking to add later).
  *
  * A `scriptRef` naming a script this blueprint does NOT ship stays entirely unrestricted, pin and
- * all — that is the pre-existing "reference a script someone else pushed" case, and it is the only
- * form that worked before this block existed.
+ * all — that is the "reference a script someone else pushed" case.
  */
 function lintScripts(value: unknown, ctx: z.RefinementCtx): void {
   const bp = value as {
@@ -3027,12 +3020,12 @@ function lintIssuerContext(value: unknown, ctx: z.RefinementCtx): void {
  *     AFTER the bootstrap phase. Ordinary data-plane provisioning, confined to
  *     the blueprint's own `contextId`.
  *
- * SELF-DOCUMENTING PHASE METADATA: which phase a field applies in was, until
- * this map existed, a fact enforced ONLY by `runLoader`'s hardcoded imperative
+ * SELF-DOCUMENTING PHASE METADATA: which phase a field applies in is
+ * otherwise a fact enforced ONLY by `runLoader`'s hardcoded imperative
  * sequence in `@vectros-ai/cli` — not something readable from
- * `BlueprintSchema`'s own type definitions. That gap is exactly what produced
- * an early design mistake for `issuers` (a first draft proposed folding it into
- * the in-context load). This map is the fix: the loader package
+ * `BlueprintSchema`'s own type definitions, which makes a field easy to
+ * mis-place (e.g. folding `issuers` into the in-context load). This map makes
+ * the phase explicit: the loader package
  * imports it rather than re-asserting the phase distinction a second time in
  * its own comments, so the two can't independently drift, and a fork author (or
  * a future field author) can inspect it directly instead of reading
@@ -3081,10 +3074,10 @@ export const BlueprintSchema = z
     /** Stable blueprint id (the `--blueprint <name>` selector + idempotency key). */
     name: safeDisplayString(z.string().min(1)),
     version: safeDisplayString(z.string().min(1)),
-    // NOT safeDisplayString — deliberately, after that wrap broke a real, multi-line-authored
-    // blueprint's `description` in review. `description` is never interpolated into any
+    // NOT safeDisplayString — deliberately: that wrap breaks real, multi-line-authored
+    // blueprint `description`s. `description` is never interpolated into any
     // rendered plan-preview line (`buildPlan`'s header prints
-    // `name`/`version`/`contextId`, never `description` — confirmed by grep, not assumed), so
+    // `name`/`version`/`contextId`, never `description`), so
     // wrapping it protected a sink that does not exist. It also actively broke real content:
     // this is exactly the field authors reach for a YAML folded (`>`) or literal (`|`) block
     // scalar to write, and clip chomping (the YAML default) always leaves exactly one trailing
@@ -3100,9 +3093,8 @@ export const BlueprintSchema = z
     /**
      * Human-readable app-context name; defaults to `MCP — <name>` (see {@link contextNameOf})
      * when absent. `safeDisplayString`: `contextNameOf` renders this raw into the FIRST line of
-     * every `buildPlan` summary (the `context '...' (...)` step) — a gap found after the rest
-     * of this file's forgery-character pass had already shipped; same shape as
-     * `name`/`version`/`description` right above it.
+     * every `buildPlan` summary (the `context '...' (...)` step); same shape as
+     * `name`/`version` right above it.
      */
     contextName: safeDisplayString(z.string().min(1)).optional(),
     /**
@@ -3198,9 +3190,8 @@ export const BlueprintSchema = z
     identityProjectionClaims: z
       .array(
         // safeDisplayString: rendered raw into buildPlan's context step (`identity projection:
-        // [...]`) — same rendered-plan-preview shape as `capturedClaims` (its structural pair,
-        // and fixed alongside it originally), missed here in the first pass; same ordering rule
-        // applies (safeDisplayString's own `.refine` before the blank-name `.refine` below,
+        // [...]`) — same rendered-plan-preview shape as `capturedClaims` (its structural pair);
+        // the same ordering rule applies (safeDisplayString's own `.refine` before the blank-name `.refine` below,
         // both after `.max` since `.refine` returns a ZodEffects with no `.max`).
         safeDisplayString(
           z.string().max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {

@@ -26,7 +26,7 @@ import {
   type Blueprint,
 } from '@vectros-ai/blueprints';
 
-const tm = getBlueprint('task-management');    // a bundled Blueprint
+const tm = getBlueprint('task-management');    // a bundled Blueprint, or undefined for an unknown name
 const mine = parseBlueprintJson(jsonText);     // parse + validate untrusted JSON (throws on bad shape)
 ```
 
@@ -38,6 +38,12 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
 - `Blueprint` + field/schema/seed types — the format.
 - `parseBlueprint(input)` / `parseBlueprintJson(json)` — structural (zod)
   validation; throws `BlueprintValidationError` on a malformed shape.
+- `resolveBlueprintInputs(raw, supplied?)` / `InputsDeclSchema` / `BlueprintInputError` / `deriveSuffix(contextId)` —
+  install-time `inputs:` substitution (see [Inputs](#inputs)). It returns the document with the `inputs:` block removed,
+  ready for `parseBlueprint`, and throws `BlueprintInputError` (with structured `issues`) on a declaration, value or
+  reference problem.
+- `resolveBlueprintIdentities(...)` / `collectIdentityReferences(value)` / `BlueprintIdentityError` — resolve the
+  `${{ identities.<name> }}` references of a blueprint's `identities:` block to concrete principal ids.
 - `contextNameOf(blueprint)` — the app-context display name. Falls back to
   `MCP — <name>` when the blueprint omits `contextName`.
 - `companyNameOf(blueprint)` — the deploying organization's own display name, distinct from
@@ -71,7 +77,7 @@ This is the format *contract* reference. For the authoring *workflow*
 
 `fields[]` describes the record's payload. `externalId` is the record's built-in identifier,
 and `userId` and `scopes` are its ownership keys; the platform rejects all three as payload
-keys on a record or document, so never declare one as a field (the platform reserves `partnerUserId` too).
+keys on a record or document,, so never declare one as a field.
 
 A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
 `required`, `searchable`, `filterable`, `enumValues`, `description`):
@@ -420,8 +426,8 @@ triggers:
 - `firingSource.schemaName` + `firingSource.event` (`CREATE`/`UPDATE`/`DELETE`) — which schema
   event invokes the script. `schemaName` must name a `typeName` this same blueprint declares
   under `schemas:`.
-- `scriptRef.name` + `scriptRef.version` — the script to run. `version` is an exact integer, or
-  the literal `"latest"` to float to whichever version is current when the trigger actually fires
+- `scriptRef.name` + `scriptRef.version` — the script to run. `version` is an exact version number
+  written as a string (`'3'`; an unquoted number is rejected), or the literal `"latest"` to float to whichever version is current when the trigger actually fires
   (rather than pinning to the version current at blueprint-apply time).
 
   ⚠️ **If the script is one this blueprint SHIPS via `scripts:`, `latest` is the only accepted
@@ -655,6 +661,29 @@ infer or remember: `BLUEPRINT_FIELD_PHASES` (exported alongside `Blueprint`) is 
 
 All of the above are **optional and backward-compatible** — a blueprint that
 omits them parses and provisions exactly as before.
+
+## Inputs
+
+A blueprint can declare a top-level `inputs:` block and use its values in any string with `${{ inputs.<name> }}`:
+
+```yaml
+inputs:
+  companyName: { type: string, required: true, description: The deploying organization }
+  retentionDays: { type: number, default: 30 }
+contextId: intake
+contextName: ${{ inputs.companyName }} intake
+```
+
+- Each input declares a `type` (`string`, `number` or `boolean`) and may declare `required`, `default` and `description`.
+  Input names are identifiers (letters, digits and underscores, not starting with a digit).
+- A token that is a whole value keeps the input's type (a `number` input stays a number); a token inside a longer string
+  is substituted as text.
+- `${{ vectros.context }}` is the blueprint's `contextId` and `${{ vectros.suffix }}` is a short stable token derived from
+  it, for names that must not collide when you install the blueprint in several contexts of one tenant. `contextId` itself
+  must be a literal.
+- With the CLI, supply values with `--set name=value` (repeatable) or `--values <file>`; `--set` wins over `--values`, which
+  wins over the declared `default`. An unknown input, a missing value with no default, or a value of the wrong type is
+  reported as an error before any request is sent. Write `$${{` for a literal `${{`. Inputs are `${{ inputs.<name> }}` (with an `s`); `${{ input.<name> }}` is a different placeholder, resolved by the platform for a trigger's `dataScope`, so a mistyped `input` passes this step and is rejected afterwards unless it sits inside a trigger's `dataScope`.
 
 ## Authoring
 

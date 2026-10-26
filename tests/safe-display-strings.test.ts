@@ -186,13 +186,12 @@ test('issuers[].issuer: REJECTS a non-http(s) scheme', () => {
 
 // ── safeUrlString's authority grammar: the full enumeration, not a sample ──────
 //
-// The two real bypasses a first version of this check missed (userinfo phishing, a
-// percent-encoded homoglyph host) both worked by exploiting `new URL()`'s own parsing
-// behavior (userinfo splitting, percent-decode-then-IDNA-normalize). The fix replaced
-// parsing entirely with a grammar on the raw authority substring, so this enumeration
-// exists to pin every case that grammar decision was actually reasoned through for —
-// not just the two bypasses that were found, but the residuals the grammar deliberately
-// accepts or rejects as a side effect.
+// Parsing with `new URL()` is exploitable (userinfo phishing, a percent-encoded
+// homoglyph host), because its own parsing behavior does userinfo splitting and
+// percent-decode-then-IDNA-normalize. The check therefore applies a grammar to the raw
+// authority substring instead, and this enumeration pins every case that grammar
+// decision was reasoned through for — not just those two bypasses, but the residuals
+// the grammar deliberately accepts or rejects as a side effect.
 
 test('issuers[].jwksUri: REJECTS userinfo-in-authority — B2, canonical URL phishing', () => {
   assert.deepEqual(

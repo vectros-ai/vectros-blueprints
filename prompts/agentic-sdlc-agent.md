@@ -67,7 +67,8 @@ never duplicates. Per-type field lists are in the guide.
   when you also want an exact term / id / slug hit.
 - **`rag_ask`** is an *optional* cited-answer layer on top. It **consumes inference
   balance and may `402` on the free tier**, so never make recall depend on it — the
-  `hybrid_search` passages already carry the answer.
+  `hybrid_search` passages already carry the answer. A `429` `BALANCE_BUSY` or a `503`
+  `BALANCE_UNAVAILABLE` is not a shortage: retry after a moment.
 - **Query compact:** hits carry heavy passages — start `limit:3` +
   `uniqueDocuments:true`, tighten the filter before you widen the limit. Type-facet
   by tool: `hybrid_search` uses `typeName`, `record_query` uses `type`.

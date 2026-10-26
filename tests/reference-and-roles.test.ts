@@ -228,11 +228,11 @@ test('self: REJECTS ${{ under.self.userId }} in accessProfile.dataScope', () => 
   );
 });
 
-// Found in review — `${{ member.scope.<ns> }}` is the membership
+// `${{ member.scope.<ns> }}` is the membership
 // equivalent of `${{ self.* }}` (a runtime placeholder resolved
 // server-side, per request) and must get the identical placement lint: valid ONLY inside a role
-// clause's dataScope, flagged everywhere else. Before this, `member.*` had no lint entry at all —
-// a misplaced/typo'd one landed as a dead, unresolved literal with zero local warning.
+// clause's dataScope, flagged everywhere else. Without the lint, a misplaced/typo'd one
+// would land as a dead, unresolved literal with zero local warning.
 
 test('member: ACCEPTS ${{ member.scope.team }} inside a role clause dataScope', () => {
   const bp = parseBlueprint(
