@@ -9,9 +9,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBlueprint, BlueprintValidationError, type Blueprint } from '../src/types.js';
+import type { z } from 'zod';
+import { parseBlueprint, BlueprintValidationError, type BlueprintSchema } from '../src/types.js';
 
-function minimal(overrides: Partial<Blueprint> = {}): Blueprint {
+type BlueprintInput = z.input<typeof BlueprintSchema>;
+
+/** A blueprint as an author writes it (before defaults are filled in), so a test can leave out what the schema defaults. */
+function minimal(overrides: Partial<BlueprintInput> = {}): BlueprintInput {
   return {
     name: 'demo',
     version: '1.0.0',

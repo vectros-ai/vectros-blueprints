@@ -6,14 +6,19 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { z } from 'zod';
 import {
   parseBlueprint,
   BlueprintValidationError,
   BLUEPRINT_FIELD_PHASES,
-  type Blueprint,
+  type BlueprintSchema,
 } from '../src/types.js';
 
-function minimal(overrides: Partial<Blueprint> = {}): Blueprint {
+type BlueprintInput = z.input<typeof BlueprintSchema>;
+type BlueprintTriggerInput = NonNullable<BlueprintInput['triggers']>[string];
+
+/** A blueprint as an author writes it (before defaults are filled in), so a test can leave out what the schema defaults. */
+function minimal(overrides: Partial<BlueprintInput> = {}): BlueprintInput {
   return {
     name: 'demo',
     version: '1.0.0',
@@ -495,7 +500,7 @@ test('fields: is REQUIRED on a trigger entry — omitting it is an authoring err
   // (`fields: []`), not something they get by forgetting the key. The schema is .strict(), so this
   // is a loud error rather than a silent drop that 400s partway through an apply.
   assert.deepEqual(
-    issuePaths(minimal({ triggers: { t: { firingSource, scriptRef, roleIds: ['r'] } },
+    issuePaths(minimal({ triggers: { t: { firingSource, scriptRef, roleIds: ['r'] } as BlueprintTriggerInput },
       roles: { r: [{ allowedActions: ['records:r'] }] } })),
     ['triggers.t.fields'],
   );

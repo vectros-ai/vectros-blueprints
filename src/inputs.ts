@@ -26,7 +26,7 @@
  * is what `vectros.suffix` is for.
  */
 import { z } from 'zod';
-import type { BlueprintIssue } from './types.js';
+import { displaySafeLines, neutralizeIssues, type BlueprintIssue } from './types.js';
 
 /** Allowed input names: identifier-like (so they read cleanly inside `${{ inputs.x }}`). */
 const INPUT_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -45,7 +45,7 @@ const InputDeclSchema = z
   .strict();
 
 /** The top-level `inputs:` declaration block — a map of name → declaration. */
-export const InputsDeclSchema = z.record(InputDeclSchema);
+export const InputsDeclSchema = z.record(z.string(), InputDeclSchema);
 
 export type InputDecl = z.infer<typeof InputDeclSchema>;
 export type InputsDecl = z.infer<typeof InputsDeclSchema>;
@@ -58,9 +58,9 @@ export type InputsDecl = z.infer<typeof InputsDeclSchema>;
 export class BlueprintInputError extends Error {
   readonly issues: BlueprintIssue[];
   constructor(message: string, issues: BlueprintIssue[] = []) {
-    super(message);
+    super(displaySafeLines(message));
     this.name = 'BlueprintInputError';
-    this.issues = issues;
+    this.issues = neutralizeIssues(issues);
   }
 }
 
@@ -396,7 +396,7 @@ export function resolveBlueprintInputs(raw: unknown, supplied: Record<string, un
     const parsed = InputsDeclSchema.safeParse(rawInputs);
     if (!parsed.success) {
       for (const i of parsed.error.issues) {
-        const p = i.path.length ? `inputs.${i.path.join('.')}` : 'inputs';
+        const p = i.path.length ? `inputs.${i.path.map(String).join('.')}` : 'inputs';
         issues.push({ path: p, message: i.message });
       }
     } else {
@@ -440,7 +440,8 @@ export function resolveBlueprintInputs(raw: unknown, supplied: Record<string, un
   const substituted = substituteValue(body, ctx, '');
 
   if (issues.length) {
-    throw new BlueprintInputError(`Blueprint variable resolution failed:\n${renderIssues(issues)}`, issues);
+    const clean = neutralizeIssues(issues);
+    throw new BlueprintInputError(`Blueprint variable resolution failed:\n${renderIssues(clean)}`, clean);
   }
   return substituted;
 }

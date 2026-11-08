@@ -12,13 +12,10 @@ import { BlueprintSchema, BLUEPRINT_FIELD_PHASES, type LoaderPhase } from '../sr
 
 const VALID_PHASES: ReadonlySet<LoaderPhase> = new Set(['bootstrap', 'in-context']);
 
-// BlueprintSchema is `z.object({...}).strict().superRefine(...)` — the
-// superRefine wraps it in a ZodEffects, which has no `.shape` of its own; the
-// object shape lives on the wrapped inner schema (`_def.schema`).
+// BlueprintSchema is `z.object({...}).strict().superRefine(...)`; in zod 4 a refinement
+// returns the same object schema, so the top-level shape is read straight off it.
 function topLevelFieldNames(): Set<string> {
-  const inner = (BlueprintSchema as unknown as { _def: { schema: { shape: Record<string, unknown> } } })._def
-    .schema.shape;
-  return new Set(Object.keys(inner));
+  return new Set(Object.keys((BlueprintSchema as unknown as { shape: Record<string, unknown> }).shape));
 }
 
 test('every BLUEPRINT_FIELD_PHASES key names a real top-level BlueprintSchema field', () => {

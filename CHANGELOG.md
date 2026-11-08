@@ -3,6 +3,34 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.21.0 — 2026-11-07
+
+### Added
+
+- **An `agents` section declares stored agents,** keyed by name: model, optional system prompt and description, a tool whitelist
+  (`{ name, allowWrites? }`), per-run limits and an optional budget. It needs `formatVersion: 2`. `validate` checks the platform's
+  limits offline: at most 50 tools, each named once; `limits.maxWrites` at least 1 when a tool has `allowWrites: true`;
+  `limits.maxToolCalls`, when set, at least 1 when tools are listed; name 1 to 64 letters, digits, `_` or `-`; `description` up to 500
+  characters, `model` 1 to 100, `system` up to 32,000, `maxSteps` 1 to 25, `maxTokensPerCall` 16 to 8192, `maxToolCalls` 0 to 50,
+  `maxWrites` 0 to 1000, `budget.maxInferenceCents` 1 to 500. `authority` is checked for its shape only (an upper-case name such as
+  `CALLER`). New types `BlueprintAgents` and `BlueprintAgent`.
+- **An optional `formatVersion` (1 or 2; absent means 1).** `parseBlueprint` refuses a newer one with a message to upgrade
+  `@vectros-ai/cli` and `@vectros-ai/blueprints`; `BLUEPRINT_FORMAT_VERSION` and `assertSupportedFormatVersion` are exported.
+- **Error messages and issue paths show control, invisible and bidirectional characters as `?`** and stay on one line, in
+  `BlueprintValidationError`, `BlueprintInputError` and `BlueprintIdentityError`. An "unrecognized key" message is cut at 300 characters,
+  a resolver's failure text and the JSON syntax message at 500.
+- **More invisible characters are refused in names, labels, descriptions and a lookup field's `sortBy`:** U+2061-2064, U+206A-206F,
+  U+FFF9-FFFB, U+180E, the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), U+1BCA0-1BCA3 and U+1D173-1D17A. Variation selectors and
+  similar genuine-text marks stay accepted; a blueprint's top-level `description` is exempt.
+
+### Changed
+
+- **The package runs on zod 4,** and `BlueprintSchema` and `InputsDeclSchema` are zod 4 schemas. An integer beyond JavaScript's
+  safe-integer range and `Infinity` are refused, a string length counts characters, and a wrong-typed value or an over-long array stops
+  the checks that depend on it, so one run can report fewer problems. zod's own messages are reworded (`Invalid input: expected string,
+  received undefined`; `Unrecognized key: "path"`): match on the field path, not the text. The messages this package writes itself are
+  unchanged.
+
 ## 0.20.3 — 2026-10-25
 
 ### Fixed

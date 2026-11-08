@@ -12,8 +12,7 @@
  * (`@vectros-ai/cli`), NOT here: blueprints are untrusted input, and the
  * trust boundary is the binary that mints.
  *
- * The blueprint's stable id is `name` (renamed from the v0.3-internal
- * `pack` field during a later split — no shipped consumers).
+ * The blueprint's stable id is `name`.
  */
 import { z } from 'zod';
 
@@ -47,11 +46,25 @@ const CONTEXT_ID_RE = /^[a-z][a-z0-9-]{2,30}$/;
  *   Soft hyphen:               U+00AD
  *   Arabic Letter Mark:        U+061C
  *   Zero-width + BOM:          U+200B-U+200D (ZWSP/ZWNJ/ZWJ), U+2060 (word joiner), U+FEFF
+ *   Invisible operators:       U+2061-U+2064 (function application .. invisible plus), U+206A-U+206F
+ *                              (deprecated format controls)
+ *   Interlinear annotation:    U+FFF9-U+FFFB
+ *   Mongolian vowel separator: U+180E
+ *   Hangul fillers:            U+115F, U+1160, U+3164, U+FFA0 (render as blank)
+ *   Shorthand and musical
+ *   format controls:           U+1BCA0-U+1BCA3, U+1D173-U+1D17A
+ *
  *   Bidi MARKS (reorder only): U+200E, U+200F (LRM/RLM)
  *   Line/paragraph separators: U+2028, U+2029
  *   Bidi control characters:   U+202A-U+202E (embed/override), U+2066-U+2069 (isolate)
  *   Unicode tag characters:    U+E0000-U+E007F (render invisibly; two distinct byte sequences
  *                              can look identical on screen)
+ *
+ * The criterion for the set above: a character is refused when it has no use in the SHORT text a person types as a name, a
+ * label or a description (it is invisible, it reorders text, or it ends a line). It is not an exhaustive list of the
+ * invisible characters Unicode has. Not refused, because genuine text needs them: the variation selectors (U+FE00-U+FE0F,
+ * which real emoji need), the Arabic and Kaithi number-format marks and the Egyptian hieroglyph format controls, and the
+ * combining grapheme joiner. Add one only with a case that shows it hiding something a name should not hide.
  *
  * ⚠️ WHAT THIS DOES **NOT** CLOSE — state plainly, not implied by omission:
  *
@@ -70,17 +83,19 @@ const CONTEXT_ID_RE = /^[a-z][a-z0-9-]{2,30}$/;
  *      have no equivalent "must be ASCII" constraint a legitimate author could always satisfy.
  */
 const FORGERY_CHARS_RE =
-  /[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
+  // eslint-disable-next-line no-control-regex -- matching control characters is what this pattern is for
+  /[\x00-\x1f\x7f-\x9f\u00ad\u061c\u115f\u1160\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f}]/u;
+
+/** The same pattern, global, for replacing every match in a name that is about to be echoed. */
+const FORGERY_CHARS_GLOBAL_RE = new RegExp(FORGERY_CHARS_RE.source, 'gu');
 
 /**
  * Wrap a `z.string()` schema — AFTER any shape constraints (`.min`/`.max`/etc.) are already
- * applied, never before: `.refine()` returns a `ZodEffects`, which drops `ZodString`'s own
- * chainable methods, so this must be the LAST call in the chain (matching every other
- * `.refine()` use in this file). For any field a rendered, human-reviewed surface (today:
- * the CLI's plan preview; potentially others later) may interpolate into a single line — see
- * `FORGERY_CHARS_RE`'s own doc for why this lives at the schema, not at each renderer, AND for
- * what it does and does NOT close (length; homoglyphs on a non-URL field). For a field whose
- * value is itself a URL (`issuer`/`jwksUri`/`userinfoUri`), use `safeUrlString` below instead —
+ * applied: by convention this is the LAST call in the chain, matching every other `.refine()` use
+ * in this file. For any field a rendered, human-reviewed surface (today: the CLI's plan preview;
+ * potentially others later) may interpolate into a single line — see `FORGERY_CHARS_RE`'s own doc
+ * for why this lives at the schema, not at each renderer, AND for what it does and does NOT close
+ * (length; homoglyphs on a non-URL field). For a field whose value is itself a URL (`issuer`/`jwksUri`/`userinfoUri`), use `safeUrlString` below instead —
  * it closes the homoglyph class for those three specifically, which this function cannot.
  *
  * ⚠️ UNSUITABLE for any field authored as a YAML block scalar (`>` folded or `|` literal) — the
@@ -344,7 +359,7 @@ const BlueprintFieldDefSchema = z
 // that can additionally declare a uniqueness constraint, an ordered range/prefix
 // index, an exact-match sort key, an opt-in past the fast-index budget, or —
 // the composite (conjunctive) form — several fields matched together at once.
-// The loader normalizes all three to the partner-API `LookupDef` shape ([SV5]).
+// The loader normalizes all three to the platform's lookup definition shape.
 // safeDisplayString on every string leaf below: a schema's `lookupFields` renders raw into
 // `buildPlan`'s schema-step summary line (the `lookupNote`, alongside `fieldId`'s
 // sensitive-fields note on that same line) — a gap found after the rest of this file's
@@ -379,7 +394,8 @@ const BlueprintLookupFieldSchema = z.union([
       // or a declared field on this schema. Locked at create. Valid on a
       // composite lookup too — it orders WITHIN a group when a query supplies
       // fewer values than the lookup declares, not across the whole result.
-      sortBy: z.string().min(1).optional(),
+      // Printed by the CLI's lint findings, so held to the displayed-text rule like the other names here.
+      sortBy: safeDisplayString(z.string().min(1)).optional(),
       // Opt a field past the fixed fast-index budget into a higher-cost
       // secondary index. No effect on a field that fits within the budget.
       allowOverflow: z.boolean().optional(),
@@ -708,7 +724,7 @@ const BlueprintAccessProfileSchema = z
     // this file, and so a future preview enhancement that starts showing these values (a very
     // plausible one, given the existing renderPlanDataScope precedent) doesn't silently reopen
     // this exact class on a field that looks, byte-for-byte, like every other one already closed.
-    dataScope: z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
+    dataScope: z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
     // Optional identity overrides for the service principal's profile — scope
     // values its key STAMPS onto everything it writes (a credential can only
     // stamp ownership its identity carries). Keys are the namespaced `scope:<ns>`
@@ -721,7 +737,7 @@ const BlueprintAccessProfileSchema = z
     // below (`lintIdentityOverrides`, placeholder-aware — see that function's
     // docstring); this `.min(1)` is only the shape-level "non-blank" guard on
     // the value, not the grammar check.
-    identityOverrides: z.record(z.string().min(1)).optional(),
+    identityOverrides: z.record(z.string(), z.string().min(1)).optional(),
     // Optional capabilities granted to the blueprint's own service-principal
     // profile. DECISION: allowed here, not role-clause-only. On the platform,
     // an access profile's scopes are themselves a list of clauses — the exact
@@ -835,7 +851,7 @@ const BlueprintAccessProfileSchema = z
 const BlueprintRoleClauseSchema = z
   .object({
     allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1),
-    dataScope: z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
+    dataScope: z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
     dataScopeRef: z.string().min(1).optional(),
     capabilities: GrantedCapabilitiesSchema,
     assignableRoles: AssignableRolesSchema,
@@ -861,7 +877,8 @@ const BlueprintRoleClauseSchema = z
 // provisioned resource (absent from `BLUEPRINT_FIELD_PHASES`), and does not
 // survive `parseBlueprint` as a live reference — only as expanded literals.
 const BlueprintFragmentsSchema = z.record(
-  z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))),
+  z.string(),
+  z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))),
 );
 
 // Optional top-level `roles`: a map of roleId → ordered clauses. Authored in the
@@ -889,7 +906,7 @@ const BlueprintRolesSchema = z.record(safeDisplayString(z.string().min(1)), z.ar
 // `dataScope`, where it is the one non-namespaced key allowed — and no value
 // may be `null` (assumable has no tenant-level/owner-less reading to opt
 // into; `/assume` always requests one concrete value).
-const BlueprintRoleAssumableSchema = z.record(z.array(safeDisplayString(z.string().min(1))).min(1));
+const BlueprintRoleAssumableSchema = z.record(z.string(), z.array(safeDisplayString(z.string().min(1))).min(1));
 
 // `roleAssumable` is a SEPARATE top-level map (roleId →
 // grant), not a field folded into a `roles[roleId]` entry. Deliberate: a
@@ -902,7 +919,7 @@ const BlueprintRoleAssumableSchema = z.record(z.array(safeDisplayString(z.string
 // top-level-map-plus-reference shape, just keyed by roleId instead of a
 // fragment name — `lintRoleAssumable` below is this field's twin of
 // `lintDataScopeRefs`, checking every key names a DECLARED role).
-const BlueprintRoleAssumableMapSchema = z.record(BlueprintRoleAssumableSchema);
+const BlueprintRoleAssumableMapSchema = z.record(z.string(), BlueprintRoleAssumableSchema);
 
 // The blueprint-authoring surface for an async trigger rule: "when a schema record fires this
 // event, invoke this script version under this grant/manifest." The rule FIRES: a matching record
@@ -979,7 +996,7 @@ const BlueprintTriggerEntrySchema = z
     scriptRef: BlueprintTriggerScriptRefSchema,
     allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1).optional(),
     roleIds: z.array(z.string().min(1)).min(1).optional(),
-    dataScope: z.record(z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
+    dataScope: z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
     capabilities: GrantedCapabilitiesSchema,
     manifest: BlueprintTriggerManifestSchema,
     /**
@@ -1131,7 +1148,161 @@ const BlueprintScriptEntrySchema = z
 // Optional top-level `scripts`: a map of scriptName -> declaration, keyed by name exactly as
 // `triggers` and `roles` are. Applied IN-CONTEXT and, critically, BEFORE the triggers that may
 // reference it — see BLUEPRINT_FIELD_PHASES and the loader's own ordering note.
-const BlueprintScriptsSchema = z.record(BlueprintScriptEntrySchema);
+const BlueprintScriptsSchema = z.record(z.string(), BlueprintScriptEntrySchema);
+
+/**
+ * The blueprint format this package reads and writes. Version 2 added the `agents` section. From this
+ * version on, a blueprint that declares a newer `formatVersion` is refused up front (see
+ * {@link assertSupportedFormatVersion}) with a message that names the format, instead of failing later on
+ * whatever key it does not recognize. Versions released before `formatVersion` existed refuse the key
+ * itself as unrecognized.
+ */
+export const BLUEPRINT_FORMAT_VERSION = 2;
+
+/** The platform's own limits on a stored agent, checked here so `validate` catches them offline. */
+const AGENT_LIMITS = {
+  descriptionChars: 500,
+  modelChars: 100,
+  systemChars: 32_000,
+  tools: 50,
+  maxSteps: 25,
+  minTokensPerCall: 16,
+  maxTokensPerCall: 8_192,
+  maxToolCalls: 50,
+  maxWrites: 1_000,
+  maxInferenceCents: 500,
+} as const;
+
+const AGENT_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+const BlueprintAgentToolSchema = z
+  .object({
+    /** The tool's name in the platform's tool catalog. Checked against the catalog when the blueprint is applied. */
+    name: z.string().regex(AGENT_TOOL_NAME_RE, {
+      message: "a tool name is 1-64 characters of letters, digits, underscores ('_') and hyphens ('-')",
+    }),
+    /** Required `true` for a tool that creates, changes or deletes data. */
+    allowWrites: z.boolean().optional(),
+  })
+  .strict();
+
+const BlueprintAgentEntrySchema = z
+  .object({
+    description: z.string().max(AGENT_LIMITS.descriptionChars).optional(),
+    /**
+     * Whose identity the agent's tool calls run with. `CALLER` (the caller who starts the run) is the only value the platform accepts
+     * today. Checked here for its SHAPE only, never against a list: the set will grow, and the platform refuses a value it does not
+     * support when the blueprint is applied, so an older copy of this package never refuses a value a newer platform accepts.
+     */
+    authority: z.string().regex(/^[A-Z][A-Z_]{0,31}$/, { message: "authority is an upper-case name such as 'CALLER'" }).optional(),
+    /** The model the agent runs on, by its id in the model catalog. */
+    // Shown in the plan preview, so held to the same rule as every other displayed text.
+    model: safeDisplayString(z.string().min(1).max(AGENT_LIMITS.modelChars)),
+    /** The system prompt. */
+    system: z.string().max(AGENT_LIMITS.systemChars).optional(),
+    /** The tool whitelist. */
+    tools: z.array(BlueprintAgentToolSchema).max(AGENT_LIMITS.tools).optional(),
+    limits: z
+      .object({
+        maxSteps: z.number().int().min(1).max(AGENT_LIMITS.maxSteps).optional(),
+        maxTokensPerCall: z.number().int().min(AGENT_LIMITS.minTokensPerCall).max(AGENT_LIMITS.maxTokensPerCall).optional(),
+        maxToolCalls: z.number().int().min(0).max(AGENT_LIMITS.maxToolCalls).optional(),
+        maxWrites: z.number().int().min(0).max(AGENT_LIMITS.maxWrites).optional(),
+      })
+      .strict()
+      .optional(),
+    budget: z
+      .object({
+        /** US cents per run, up to 500. The platform also enforces a minimum and refuses a lower value when the blueprint is applied. */
+        maxInferenceCents: z.number().int().min(1).max(AGENT_LIMITS.maxInferenceCents).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Optional top-level `agents`: a map of agentName -> definition, keyed by name as `scripts` are. Each
+// entry is the CURRENT definition for that name; the platform keeps the versions. Re-applying an
+// unchanged blueprint writes nothing; editing an entry writes a new version.
+const BlueprintAgentsSchema = z.record(safeDisplayString(z.string()), BlueprintAgentEntrySchema);
+
+/**
+ * Refuses a blueprint whose `formatVersion` is newer than this package reads, before the structural
+ * parse, so the refusal names the unsupported format instead of reporting the newer format's keys as
+ * unrecognized.
+ * A missing `formatVersion` is format 1; a non-number is left to the structural parse to report.
+ */
+export function assertSupportedFormatVersion(input: unknown): void {
+  if (input === null || typeof input !== 'object') return;
+  const declared = (input as { formatVersion?: unknown }).formatVersion;
+  if (typeof declared === 'number' && Number.isInteger(declared) && declared > BLUEPRINT_FORMAT_VERSION) {
+    throw new BlueprintValidationError(
+      `This blueprint uses format version ${declared}; this tool supports format versions up to ` +
+        `${BLUEPRINT_FORMAT_VERSION}. Upgrade @vectros-ai/cli and @vectros-ai/blueprints and try again.`,
+      [{ path: 'formatVersion', message: `unsupported format version ${declared}` }],
+    );
+  }
+}
+
+/**
+ * Cross-field rules for `agents`: a valid name per entry, the `formatVersion` that introduced the
+ * section, each tool named once, and the limits a write grant or a tool list needs to be usable.
+ */
+function lintAgents(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    formatVersion?: number;
+    agents?: Record<
+      string,
+      { tools?: Array<{ name: string; allowWrites?: boolean }>; limits?: { maxToolCalls?: number; maxWrites?: number } }
+    >;
+  };
+  const agents = bp.agents;
+  if (!agents) return;
+  if ((bp.formatVersion ?? 1) < 2) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['formatVersion'],
+      message: "an 'agents' section needs 'formatVersion: 2' (so a tool that reads an older format refuses the file instead of misreading it)",
+    });
+  }
+  for (const [name, agent] of Object.entries(agents)) {
+    if (!SCRIPT_NAME_RE.test(name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agents', name],
+        message:
+          `agents['${displaySafe(name, 80)}'] is not a valid agent name — use 1-64 characters of letters, digits, underscores ('_') ` +
+          "and hyphens ('-'). The map key IS the name the platform stores.",
+      });
+    }
+    const tools = agent?.tools ?? [];
+    const seen = new Set<string>();
+    tools.forEach((tool, i) => {
+      if (seen.has(tool.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['agents', name, 'tools', i, 'name'],
+          message: `tool '${displaySafe(tool.name, 80)}' is listed twice`,
+        });
+      }
+      seen.add(tool.name);
+    });
+    if (tools.some((t) => t.allowWrites === true) && (agent?.limits?.maxWrites ?? 0) < 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agents', name, 'limits', 'maxWrites'],
+        message: 'limits.maxWrites must be at least 1 when a tool has allowWrites: true',
+      });
+    }
+    if (tools.length > 0 && agent?.limits?.maxToolCalls === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agents', name, 'limits', 'maxToolCalls'],
+        message: 'limits.maxToolCalls must be at least 1 when tools are listed',
+      });
+    }
+  }
+}
 
 // A namespace name: a lowercase letter first, then lowercase letters,
 // digits, `_` or `-`, 2-32 chars — mirrors the platform's own namespace-
@@ -1178,7 +1349,7 @@ const IdentityDeclSchema = z
     // sibling fields) — it does reach a platform API payload as an entity's `name`.
     externalId: safeDisplayString(z.string().min(1)),
     displayName: safeDisplayString(z.string().min(1)).optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 
@@ -1284,7 +1455,7 @@ function assertNoDuplicateClaimNames(field: string) {
 // phase — alongside app-context/service-principal creation, NOT folded into the
 // in-context load with schemas/accessProfile/roles. Tenant-wide provisioning
 // config: needs the bootstrap credential's owner-only `provisioning:c`, the same
-// gate the app-context create itself requires, never an ordinary partner-grantable
+// gate the app-context create itself requires, never an ordinary context-scoped
 // scope. Shape mirrors the SDK's `IssuerRequest` 1:1 so the loader forwards it
 // without a transform.
 const BlueprintIssuerSchema = z
@@ -1413,8 +1584,7 @@ const BlueprintIssuerSchema = z
     capturedClaims: z
       .array(
         // `safeDisplayString` (a `.refine`) then the blank-name `.refine` — both ordered AFTER
-        // `.max`, since `.refine` returns a ZodEffects, which has no `.max` (`.refine` itself
-        // chains fine onto a ZodEffects — it's on the ZodType base, not ZodString-specific).
+        // `.max`, by the same last-call convention.
         // `.min(1)` would be a LENGTH check and would admit a whitespace-only name while the
         // message claims "non-blank"; the platform rejects on isBlank(). Note the value is
         // REJECTED, not trimmed — it reaches the wire exactly as authored, matching how the
@@ -1556,7 +1726,7 @@ const BlueprintNamespaceSchema = z
  * surfaces at apply, same as the platform's own non-idempotent-registration
  * collision), and `namespace` uniqueness within this blueprint's own list.
  */
-/** The platform's own DDB-key-embeddable identifier grammar — 1-64 chars, letters/digits/underscore/hyphen. */
+/** The platform's own key-safe identifier grammar: 1-64 chars, letters/digits/underscore/hyphen. */
 const MEMBERSHIP_FIELD_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function lintNamespaces(value: unknown, ctx: z.RefinementCtx): void {
@@ -1634,7 +1804,7 @@ function lintNamespaces(value: unknown, ctx: z.RefinementCtx): void {
       });
     }
     // membershipRecordType/membershipTargetField/membershipLevelField are each
-    // validated by the platform as a DDB-key-embeddable identifier (1-64 chars,
+    // validated by the platform as a key-safe identifier (1-64 chars,
     // letters/digits/underscore/hyphen) — the same grammar a schema fieldId or
     // lookup fieldName uses, distinct from a namespace/level's own grammar. Not
     // checking this client-side is the same "lints clean, 400s at apply" class
@@ -1750,7 +1920,7 @@ const RecordSeedSchema = z
     surface: z.literal('record'),
     ...SeedCommonShape,
     /** The record payload, validated against the bound schema. */
-    fields: z.record(z.unknown()),
+    fields: z.record(z.string(), z.unknown()),
   })
   .strict();
 
@@ -1763,7 +1933,7 @@ const DocumentSeedSchema = z
     /** Raw text content to ingest + index — REQUIRED and non-empty (the platform rejects a blank ingest). */
     text: z.string().min(1),
     /** Optional structured payload bound to the schema (the document's `fields`). */
-    fields: z.record(z.unknown()).optional(),
+    fields: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 
@@ -3062,6 +3232,8 @@ export const BLUEPRINT_FIELD_PHASES: Readonly<Record<string, LoaderPhase>> = Obj
   // principal/AccessProfile pairs instead of one), so it applies in the identical in-context phase,
   // under the same re-minted context-confined token.
   triggers: 'in-context',
+  // Written with the same in-context, context-confined token as scripts and triggers.
+  agents: 'in-context',
   // Setting it requires the platform provisioning capability, which only the bootstrap credential
   // carries — the same reasoning as issuers/namespaces above. It is applied to the app context
   // itself, which the bootstrap phase already creates, so there is nothing for the in-context pass
@@ -3192,7 +3364,7 @@ export const BlueprintSchema = z
         // safeDisplayString: rendered raw into buildPlan's context step (`identity projection:
         // [...]`) — same rendered-plan-preview shape as `capturedClaims` (its structural pair);
         // the same ordering rule applies (safeDisplayString's own `.refine` before the blank-name `.refine` below,
-        // both after `.max` since `.refine` returns a ZodEffects with no `.max`).
+        // both after `.max`, by the last-call convention).
         safeDisplayString(
           z.string().max(MAX_CAPTURED_CLAIM_NAME_LENGTH, {
             message: `an identityProjectionClaims entry must be at most ${MAX_CAPTURED_CLAIM_NAME_LENGTH} characters`,
@@ -3227,6 +3399,15 @@ export const BlueprintSchema = z
      * narrowly as you would any other credential's.
      */
     triggers: BlueprintTriggersSchema.optional(),
+    /**
+     * The blueprint format version; absent means 1. A blueprint with an `agents` section declares 2.
+     */
+    formatVersion: z.number().int().min(1).max(BLUEPRINT_FORMAT_VERSION).optional(),
+    /**
+     * Optional stored agents: agentName -> definition. A run of an agent calls tools with the identity
+     * and permissions of the caller who starts the run, further limited by the agent's tool whitelist.
+     */
+    agents: BlueprintAgentsSchema.optional(),
   })
   .strict()
   .superRefine((bp, ctx) => {
@@ -3247,6 +3428,7 @@ export const BlueprintSchema = z
     lintTriggers(bp, ctx);
     lintTriggerFields(bp, ctx);
     lintScripts(bp, ctx);
+    lintAgents(bp, ctx);
   });
 
 export type Blueprint = z.infer<typeof BlueprintSchema>;
@@ -3277,6 +3459,8 @@ export type BlueprintTriggers = z.infer<typeof BlueprintTriggersSchema>;
 export type BlueprintScriptEntry = z.infer<typeof BlueprintScriptEntrySchema>;
 /** The top-level `scripts` map: scriptName -> declaration. */
 export type BlueprintScripts = z.infer<typeof BlueprintScriptsSchema>;
+export type BlueprintAgents = z.infer<typeof BlueprintAgentsSchema>;
+export type BlueprintAgent = z.infer<typeof BlueprintAgentEntrySchema>;
 /** A named, reusable `dataScope` map, referenced via a clause's `dataScopeRef`. */
 export type BlueprintFragments = z.infer<typeof BlueprintFragmentsSchema>;
 /** One role's `POST /v1/auth/token/assume` entitlement grant — the value type of `roleAssumable[roleId]`. */
@@ -3293,24 +3477,91 @@ export type IdentitiesDecl = z.infer<typeof IdentitiesDeclSchema>;
  * re-parsing the rendered message.
  */
 export interface BlueprintIssue {
-  /** Dotted/bracketed path, e.g. `schemas[0].fields[1].fieldType`, or `(root)`. */
+  /**
+   * Dotted/bracketed path, e.g. `schemas[0].fields[1].fieldType`, or `(root)`. A segment holding a control, invisible or
+   * bidi character (a map key that is hostile) is shown with each such character as `?`, so the path is safe to print.
+   */
   path: string;
   message: string;
 }
 
+/**
+ * `text` with each forgery character shown as `?` and a long value cut, for echoing a name an author typed in an error
+ * message or path: the name may be the very thing that is hostile.
+ */
+export function displaySafe(text: string, maxLength = Number.POSITIVE_INFINITY): string {
+  const shown = Array.from(text.replace(FORGERY_CHARS_GLOBAL_RE, '?'));
+  return shown.length > maxLength ? `${shown.slice(0, maxLength).join('')}...` : shown.join('');
+}
+
+/**
+ * {@link displaySafe} for text from outside that is itself several lines (an SDK error envelope such as
+ * "BadRequestError\nStatus code: 400\nBody: {...}"): each line break becomes a space first, so the text stays readable on
+ * one line instead of turning into `?` characters.
+ */
+export function displaySafeInline(text: string, maxLength = Number.POSITIVE_INFINITY): string {
+  return displaySafe(text.replace(/\r\n|[\r\n\u0085\u2028\u2029]/g, ' '), maxLength);
+}
+
+/**
+ * `text` with forgery characters shown as `?` everywhere except line breaks: for a message that is legitimately several
+ * lines (the one an error class carries), where a line break is the message's own and the author's text inside it has
+ * already been made single-line.
+ */
+export function displaySafeLines(text: string): string {
+  return text.replace(/\r\n/g, '\n').split('\n').map((line) => displaySafe(line)).join('\n');
+}
+
+/** The issues with each path and message made single-line and free of forgery characters; used by every error class that carries issues. */
+export function neutralizeIssues(issues: ReadonlyArray<BlueprintIssue>): BlueprintIssue[] {
+  return issues.map((i) => ({ path: displaySafe(i.path), message: displaySafe(i.message) }));
+}
+
+/**
+ * The message of an issue, made single-line and free of forgery characters: a custom message may interpolate a name an
+ * author typed, and zod's "Unrecognized key" message repeats every key typed.
+ */
+function quotedKeysSafe(issue: { code: string; message: string }): string {
+  // No message of ours contains a control character; one that does is text an author supplied. Zod's own unrecognized-key
+  // message repeats every key typed, so it is also cut.
+  return displaySafe(issue.message, issue.code === 'unrecognized_keys' ? 300 : Number.POSITIVE_INFINITY);
+}
+
 /** Render a zod issue path (`['schemas', 0, 'fields', 1]`) → `schemas[0].fields[1]`. */
-function formatIssuePath(path: ReadonlyArray<string | number>): string {
+function formatIssuePath(path: ReadonlyArray<PropertyKey>): string {
   let out = '';
   for (const seg of path) {
     if (typeof seg === 'number') out += `[${seg}]`;
-    else out += out.length ? `.${seg}` : seg;
+    else out += out.length ? `.${displaySafe(String(seg))}` : displaySafe(String(seg));
   }
   return out.length ? out : '(root)';
 }
 
+/**
+ * The issues of a {@link z.ZodError} as ordered `{path, message}` entries, with each path segment
+ * kept as a key.
+ *
+ * A record KEY that fails its schema arrives as one `invalid_key` issue whose own message is the
+ * generic "Invalid key in record"; the key schema's real message (the identity-name grammar, the
+ * forgery-character rule) is nested under `issues`. Those nested messages are the ones an author
+ * needs, so they are reported at the key's path in its place.
+ */
+export function flattenZodIssues(error: z.ZodError): Array<{ path: PropertyKey[]; message: string }> {
+  const out: Array<{ path: PropertyKey[]; message: string }> = [];
+  for (const i of error.issues) {
+    const nested = i.code === 'invalid_key' ? i.issues : undefined;
+    if (nested && nested.length > 0) {
+      for (const n of nested) out.push({ path: [...i.path, ...n.path], message: quotedKeysSafe(n) });
+    } else {
+      out.push({ path: [...i.path], message: quotedKeysSafe(i) });
+    }
+  }
+  return out;
+}
+
 /** Flatten a {@link z.ZodError} into readable, ordered {path, message} entries. */
 function toBlueprintIssues(error: z.ZodError): BlueprintIssue[] {
-  return error.issues.map((i) => ({ path: formatIssuePath(i.path), message: i.message }));
+  return flattenZodIssues(error).map((i) => ({ path: formatIssuePath(i.path), message: i.message }));
 }
 
 /** Render issues into the multi-line, teach-by-error message body. */
@@ -3326,9 +3577,9 @@ export class BlueprintValidationError extends Error {
    */
   readonly issues: BlueprintIssue[];
   constructor(message: string, issues: BlueprintIssue[] = []) {
-    super(message);
+    super(displaySafeLines(message));
     this.name = 'BlueprintValidationError';
-    this.issues = issues;
+    this.issues = neutralizeIssues(issues);
   }
 }
 
@@ -3344,6 +3595,7 @@ export class BlueprintValidationError extends Error {
  * never sees a `dataScopeRef` survive past this function.
  */
 export function parseBlueprint(input: unknown): Blueprint {
+  assertSupportedFormatVersion(input);
   const result = BlueprintSchema.safeParse(input);
   if (!result.success) {
     const issues = toBlueprintIssues(result.error);
@@ -3363,7 +3615,7 @@ export function parseBlueprintJson(json: string): Blueprint {
     parsed = JSON.parse(json);
   } catch (err) {
     throw new BlueprintValidationError(
-      `Blueprint is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `Blueprint is not valid JSON: ${displaySafe(err instanceof Error ? err.message : String(err), 500)}`,
     );
   }
   return parseBlueprint(parsed);

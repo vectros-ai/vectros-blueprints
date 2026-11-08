@@ -94,13 +94,13 @@ test('scripts: an entry is .strict() — an unknown key is an authoring error, n
   // message rather than a `scripts.notify.path` that will never be produced.
   const msgs = issueMessages(minimal({ scripts: { notify: { source: SOURCE, path: './notify.js' } } } as never));
   assert.equal(msgs.length, 1);
-  assert.match(msgs[0], /Unrecognized key\(s\) in object: 'path'/);
+  assert.match(msgs[0], /Unrecognized key: "path"/);
 });
 
 test('scripts: a version number is NOT declarable — the platform assigns it', () => {
   const msgs = issueMessages(minimal({ scripts: { notify: { source: SOURCE, version: '1' } } } as never));
   assert.equal(msgs.length, 1);
-  assert.match(msgs[0], /Unrecognized key\(s\) in object: 'version'/);
+  assert.match(msgs[0], /Unrecognized key: "version"/);
 });
 
 // ---------------------------------------------------------------------------

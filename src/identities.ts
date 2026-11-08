@@ -19,7 +19,16 @@
  * `identities` block shape lives in types.ts so {@link BlueprintSchema} validates
  * it offline (incl. the "every reference is declared" lint).
  */
-import { IdentitiesDeclSchema, type IdentityDecl, type BlueprintIssue } from './types.js';
+import {
+  IdentitiesDeclSchema,
+  flattenZodIssues,
+  displaySafe,
+  displaySafeInline,
+  displaySafeLines,
+  neutralizeIssues,
+  type IdentityDecl,
+  type BlueprintIssue,
+} from './types.js';
 
 /** A `${{ identities.<name> }}` reference (global, for scan/replace). */
 const IDENTITY_TOKEN_RE = /\$\{\{\s*identities\.([A-Za-z_]\w*)\s*\}\}/g;
@@ -31,9 +40,9 @@ export type IdentityResolver = (name: string, decl: IdentityDecl) => Promise<str
 export class BlueprintIdentityError extends Error {
   readonly issues: BlueprintIssue[];
   constructor(message: string, issues: BlueprintIssue[] = []) {
-    super(message);
+    super(displaySafeLines(message));
     this.name = 'BlueprintIdentityError';
-    this.issues = issues;
+    this.issues = neutralizeIssues(issues);
   }
 }
 
@@ -92,8 +101,8 @@ export async function resolveBlueprintIdentities(raw: unknown, resolve: Identity
   if (!parsed.success) {
     throw new BlueprintIdentityError(
       'Blueprint identities block is invalid',
-      parsed.error.issues.map((i) => ({
-        path: i.path.length ? `identities.${i.path.join('.')}` : 'identities',
+      flattenZodIssues(parsed.error).map((i) => ({
+        path: i.path.length ? `identities.${i.path.map(String).join('.')}` : 'identities',
         message: i.message,
       })),
     );
@@ -103,7 +112,7 @@ export async function resolveBlueprintIdentities(raw: unknown, resolve: Identity
   const undeclared = refs.filter((name) => !(name in declared));
   if (undeclared.length) {
     throw new BlueprintIdentityError(
-      `Blueprint references undeclared identities: ${undeclared.join(', ')}`,
+      `Blueprint references undeclared identities: ${undeclared.map((n) => displaySafe(n, 80)).join(', ')}`,
       undeclared.map((name) => ({
         path: `identities.${name}`,
         message: `'\${{ identities.${name} }}' is referenced but not declared in the 'identities' block`,
@@ -124,10 +133,11 @@ export async function resolveBlueprintIdentities(raw: unknown, resolve: Identity
       idMap[name] = id;
     } catch (err) {
       throw new BlueprintIdentityError(
-        `Failed to resolve identity '${name}' (${decl.kind} externalId=${decl.externalId}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-        [{ path: `identities.${name}`, message: err instanceof Error ? err.message : String(err) }],
+        `Failed to resolve identity '${displaySafe(name, 80)}' (${decl.kind} externalId=${displaySafe(decl.externalId, 80)}): ${displaySafeInline(
+          err instanceof Error ? err.message : String(err),
+          500,
+        )}`,
+        [{ path: `identities.${name}`, message: displaySafeInline(err instanceof Error ? err.message : String(err), 500) }],
       );
     }
   }

@@ -38,6 +38,8 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
 - `Blueprint` + field/schema/seed types — the format.
 - `parseBlueprint(input)` / `parseBlueprintJson(json)` — structural (zod)
   validation; throws `BlueprintValidationError` on a malformed shape.
+- `BLUEPRINT_FORMAT_VERSION` / `assertSupportedFormatVersion(input)` — the newest blueprint `formatVersion` this
+  package reads (`2`), and the check that refuses a newer one with an upgrade message; `parseBlueprint` runs it first.
 - `resolveBlueprintInputs(raw, supplied?)` / `InputsDeclSchema` / `BlueprintInputError` / `deriveSuffix(contextId)` —
   install-time `inputs:` substitution (see [Inputs](#inputs)). It returns the document with the `inputs:` block removed,
   ready for `parseBlueprint`, and throws `BlueprintInputError` (with structured `issues`) on a declaration, value or
@@ -76,8 +78,9 @@ This is the format *contract* reference. For the authoring *workflow*
 [`@vectros-ai/cli`'s AUTHORING.md](https://www.npmjs.com/package/@vectros-ai/cli).
 
 `fields[]` describes the record's payload. `externalId` is the record's built-in identifier,
-and `userId` and `scopes` are its ownership keys; the platform rejects all three as payload
-keys on a record or document,, so never declare one as a field.
+and `userId` and `scopes` are its ownership keys; the platform rejects these three, and `partnerUserId`, as payload
+keys on a record or document, so never declare one as a field. `vectros blueprint validate` and `plan`
+warn about a field with one of these names.
 
 A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
 `required`, `searchable`, `filterable`, `enumValues`, `description`):
@@ -658,6 +661,52 @@ infer or remember: `BLUEPRINT_FIELD_PHASES` (exported alongside `Blueprint`) is 
 `@vectros-ai/cli`'s own `vectros blueprint plan` preview derives its
 `[<phase>-token phase]` annotations from this same map, so the two can't drift.
 `identities` isn't in it, for the reason given above.
+
+A blueprint may declare a top-level **`agents`** — a map of agent name → definition — for the stored
+agents it needs (`/v1/agents`). It requires `formatVersion: 2`, so a tool that predates the format
+refuses the file instead of misreading it.
+
+```yaml
+formatVersion: 2
+name: intake
+version: 1.0.0
+description: Intake records with a triage agent.
+contextId: intake
+schemas: []
+accessProfile:
+  allowedActions: [records:r, records:c]
+servicePrincipal:
+  externalId: intake-principal
+  displayName: Intake
+agents:
+  intake-triage:               # the key IS the agent's name: 1-64 letters, digits, '_' and '-'
+    description: Summarises a new intake record and flags missing fields.
+    model: claude-sonnet-5-5
+    system: You triage intake records. Be concise.
+    tools:
+      - { name: records_get }
+      - { name: records_create, allowWrites: true }   # a tool that changes data needs allowWrites ...
+    limits: { maxToolCalls: 10, maxWrites: 2 }         # ... and limits.maxWrites of at least 1
+    budget: { maxInferenceCents: 100 }
+```
+
+Each entry is the **current** definition for that name; the platform keeps the versions. Applying an
+unchanged blueprint writes nothing, and editing an entry writes the next version. Nothing is edited in
+place, so every earlier version stays readable. `validate` checks the section offline against the
+platform's limits: at most 50 tools, each named once; `limits.maxWrites` of at least 1 when a tool has
+`allowWrites: true`; `limits.maxToolCalls` not set to 0 when tools are listed; and the name and length
+rules. `authority` (whose identity the agent's tool calls run with) is checked for its shape only, an
+upper-case name such as `CALLER`, which is the only value the platform accepts. The model, the
+tool names and the minimum budget are checked by the platform when the blueprint is applied.
+
+Writing an agent needs the `agents:c` scope on the credential that applies the blueprint, and
+`agents:u` and `agents:r` as well whenever the agent already exists, even when its definition is unchanged. Those are not scopes to put in the
+blueprint's own `accessProfile`: `agents` is a control-plane resource, so the scope gate refuses it
+there. An agent that already exists with no blueprint mark (made by hand) is not written over unless the operator passes
+`--allow-agent-adoption`, and another blueprint's agent never is. Removing an entry from `agents` deletes nothing; an agent is
+retired through the API. Whether
+and how a tool applies the section is up to the tool; `@vectros-ai/cli` creates each agent after the
+roles, scripts and triggers, and its `vectros agents` command group reads and writes the same API.
 
 All of the above are **optional and backward-compatible** — a blueprint that
 omits them parses and provisions exactly as before.

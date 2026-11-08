@@ -6,9 +6,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBlueprint, BlueprintValidationError, isRestrictedToDomainName, type Blueprint } from '../src/types.js';
+import type { z } from 'zod';
+import { parseBlueprint, BlueprintValidationError, isRestrictedToDomainName, type BlueprintSchema } from '../src/types.js';
 
-function minimal(overrides: Partial<Blueprint> = {}): Blueprint {
+type BlueprintInput = z.input<typeof BlueprintSchema>;
+type BlueprintIssuerInput = NonNullable<BlueprintInput['issuers']>[number];
+
+/** A blueprint as an author writes it (before defaults are filled in), so a test can leave out what the schema defaults. */
+function minimal(overrides: Partial<BlueprintInput> = {}): BlueprintInput {
   return {
     name: 'demo',
     version: '1.0.0',
@@ -217,7 +222,7 @@ test('capturedClaims: REJECTS a duplicate rather than deduplicating, naming the 
 
 test('capturedClaims: is still subject to .strict() siblings — an unknown issuer key is rejected', () => {
   assert.deepEqual(
-    issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['name'], capturedClaim: ['x'] }] })),
+    issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, capturedClaims: ['name'], capturedClaim: ['x'] } as BlueprintIssuerInput] })),
     ['issuers[0]'],
   );
 });

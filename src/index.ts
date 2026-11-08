@@ -33,8 +33,12 @@ export {
   type BlueprintNamespace,
   type BlueprintScriptEntry,
   type BlueprintScripts,
+  type BlueprintAgents,
+  type BlueprintAgent,
   type LoaderPhase,
   BLUEPRINT_FIELD_PHASES,
+  BLUEPRINT_FORMAT_VERSION,
+  assertSupportedFormatVersion,
 } from './types.js';
 
 export {

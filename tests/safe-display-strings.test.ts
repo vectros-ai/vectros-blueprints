@@ -550,7 +550,8 @@ test('accessProfile.dataScope: REJECTS a bidi-isolate character in a value (cons
 test('roles: REJECTS a raw newline in the roleId KEY, not just a clause value — rendered raw in the role plan step', () => {
   assert.deepEqual(
     issuePaths(minimal({ roles: { [`editor${RAW_NEWLINE}`]: [{ allowedActions: ['records:r'] }] } })),
-    [`roles.editor${RAW_NEWLINE}`],
+    // The refusal names the key with each forgery character shown as `?`: the path is printed, so it is held to the same rule.
+    [`roles.editor${RAW_NEWLINE.replace('\n', '?')}`],
   );
 });
 
@@ -569,7 +570,8 @@ test('triggers: REJECTS an ANSI escape in the triggerName KEY — rendered raw A
         },
       } as Partial<Blueprint>),
     ),
-    [`triggers.on-intake${ANSI_ESCAPE}`],
+    // Shown with the escape character as `?`, so the path that is printed cannot run it.
+    [`triggers.on-intake${ANSI_ESCAPE.replace('\x1b', '?')}`],
   );
 });
 
