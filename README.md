@@ -18,6 +18,62 @@ blueprint's requested scopes to data-plane-only — lives in the CLI binary
 (the trust boundary), because blueprints are untrusted
 input.
 
+**Where to read what.** This README is the format reference: every element a
+blueprint can declare and the rules this package checks. The authoring loop
+(`init`, `validate`, `plan`, `bootstrap`, `blueprint apply`) and an annotated
+example are in
+[`@vectros-ai/cli`'s AUTHORING.md](https://www.npmjs.com/package/@vectros-ai/cli);
+the docs site's [Blueprints guide](https://docs.vectros.ai) explains what a
+blueprint is for and walks through one.
+
+## What a blueprint contains
+
+A blueprint is one YAML or JSON document. Its top-level elements:
+
+| Element | Required | What it declares |
+|---|---|---|
+| `name`, `version`, `description` | yes | The blueprint's stable id (also its idempotency key), its version and a one-line description. |
+| `contextId` | yes | The app context everything is provisioned into. `contextName` and `companyName` are optional display names. |
+| `schemas` | no | The data model: one entry per record, document, user or entity type, with its fields, lookups and settings. See [`schemas`](#schemas). |
+| `accessProfile` | yes | The least-privilege scope of the key `bootstrap` mints for the blueprint. See [Access](#access-accessprofile-roles-and-related-elements). |
+| `servicePrincipal` | yes | The service principal that key is bound to (`externalId`, `displayName`). |
+| `seed` | no | Sample records and documents to create. See [`seed`](#seed). |
+| `roles`, `fragments`, `roleAssumable` | no | Named, reusable scope rules for your users, and what a role holder may assume. |
+| `scripts`, `triggers` | no | Stored script source, and rules that run a script when a record is written. |
+| `agents` | no | Stored agents: a model, a system prompt, tools, limits and a budget per name. Needs `formatVersion: 2`. |
+| `issuers`, `identityProjectionClaims` | no | Trusted identity providers for token exchange, and which of their claims become access-profile values. |
+| `namespaces`, `identities` | no | Entity namespaces to register, and named principals other elements can reference. |
+| `inputs` | no | Values supplied at install time and used as `${{ inputs.<name> }}`. See [Inputs](#inputs). |
+| `include`, `stacks` | no | Part files for a blueprint split across files, and named groups of them applied one at a time (see `composeBlueprint` under [Exports](#exports)). |
+| `formatVersion` | no | The format the file is written in; absent means 1. |
+
+A minimal blueprint declares the four required identifiers, one schema, an
+access profile and a service principal:
+
+```yaml
+name: my-app
+version: 1.0.0
+description: A minimal example app.
+contextId: my-app
+
+schemas:
+  - typeName: note
+    displayName: Note
+    indexMode: HYBRID
+    fields:
+      - { fieldId: title, fieldType: string, required: true, searchable: true }
+      - { fieldId: body, fieldType: string, searchable: true }
+
+accessProfile:
+  allowedActions: [records:r, records:c, records:u, search:r, schemas:r]
+
+servicePrincipal:
+  externalId: my-app
+  displayName: My App
+```
+
+## Using the package
+
 ```ts
 import {
   BUNDLED_BLUEPRINTS,
@@ -44,6 +100,14 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   install-time `inputs:` substitution (see [Inputs](#inputs)). It returns the document with the `inputs:` block removed,
   ready for `parseBlueprint`, and throws `BlueprintInputError` (with structured `issues`) on a declaration, value or
   reference problem.
+- `composeBlueprint(root, parts, stackFiles?)` / `readIncludeDirective(root)` / `mergeStacks(stacks, names)` /
+  `BlueprintCompositionError` / `BLUEPRINT_PART_KEYS` / `BLUEPRINT_ROOT_ONLY_KEYS` / `ROOT_STACK` / `parseIssuePath(path)` —
+  composing one blueprint from a root document and the part documents its `include:` lists, for a blueprint split across
+  files. Pure: the caller reads the files and supplies a line locator per file. Lists concatenate and maps combine with no
+  overrides (a name declared in two files is refused with both locations), a part may declare only `BLUEPRINT_PART_KEYS`,
+  and the result's `locate(path)`/`declaredAt(message)` give the `file:line` an issue comes from. With `stacks:`, the result
+  also says what each stack declares. Run `resolveBlueprintInputs` and `parseBlueprint` on the composed document as on a
+  single file; `parseBlueprint` itself still refuses `include` and `stacks`.
 - `resolveBlueprintIdentities(...)` / `collectIdentityReferences(value)` / `BlueprintIdentityError` — resolve the
   `${{ identities.<name> }}` references of a blueprint's `identities:` block to concrete principal ids.
 - `contextNameOf(blueprint)` — the app-context display name. Falls back to
@@ -71,11 +135,20 @@ already-parsed object. Both throw `BlueprintValidationError` on a bad shape.
   [`prompts/agentic-sdlc-agent.md`](prompts/agentic-sdlc-agent.md)),
   `second-brain`, and `clinical-intake` (the PHI/sensitive-field exemplar).
 
-## The format, field by field
+## The format, element by element
 
-This is the format *contract* reference. For the authoring *workflow*
+This is the format *contract* reference: one subsection per element in the
+table above. For the authoring *workflow*
 (`init` → `validate` → `plan` → `bootstrap`), see
 [`@vectros-ai/cli`'s AUTHORING.md](https://www.npmjs.com/package/@vectros-ai/cli).
+
+### `schemas`
+
+Each `schemas` entry declares one type: `typeName` (immutable once applied), `displayName`, `indexMode`
+(`HYBRID`, `SEMANTIC`, `TEXT` or `NONE`; a record schema with none is never indexed, a document schema with
+none is refused), `allowedSurfaces` (`record` by default) and its `fields`.
+
+#### Fields
 
 `fields[]` describes the record's payload. `externalId` is the record's built-in identifier,
 and `userId` and `scopes` are its ownership keys; the platform rejects these three, and `partnerUserId`, as payload
@@ -101,6 +174,8 @@ A schema's `fields[]` carry, beyond the basics (`fieldId`, `fieldType`,
   blueprint is the exemplar. (A field that is both `sensitive` and `searchable` is
   refused: the platform answers `400` at schema creation, and `validate`/`plan` do not
   catch it, so never declare the pair.)
+
+#### Schema-level settings
 
 A schema additionally accepts:
 
@@ -156,7 +231,7 @@ A schema additionally accepts:
   a composite; `sortBy` and `allowOverflow` are still available. **Record-only**:
   a schema declaring a composite must set `allowedSurfaces` to exactly `['record']`
   (or omit it — the loader defaults to `['record']`) — the platform's composite
-  index has no document/user/entity reader yet.
+  index has no document/user/entity reader.
 - **`inline`** (per field) — keep the field on the record row when the payload is stored out of line
   (a large record, or a `LARGE_PAYLOAD` storage profile), so it appears in list and lookup
   projections without `includePayload`. It is also what makes an otherwise-ordinary field
@@ -193,7 +268,55 @@ A schema additionally accepts:
   is immutable once set. The bundled loader's own re-apply of the *same*
   blueprint never needs this — it reconciles server-side by owner — this field
   is for a schema that intentionally customizes a base another owner defined.
+- **`fileProfile: PUBLIC_MEDIA`** (with optional `mediaKinds`, `maxBytes`,
+  `contentTypes`) — makes a document schema a public-media type, for images (nothing is
+  served publicly in this release). It needs
+  `allowedSurfaces: ['document']`, is never indexed, and cannot use `basedOn`;
+  `mediaKinds` is `['image']`, `maxBytes` at most 10485760 (10 MiB), and
+  `contentTypes` a subset of `image/jpeg`, `image/png`, `image/webp`,
+  `image/gif`. Leaving the profile, or any of the three settings, out of a later
+  apply keeps the stored value; the three settings are refused offline without
+  the profile declared beside them, even for a type already stored with it. Needs platform 0.50.0 or later.
+- **`documentTypes`** on a field of type `asset` (one image) or `assets` (up to
+  20) — the public-media document types the field accepts. Required on both and
+  allowed only on them; an asset field cannot be sensitive, searchable, an enum
+  or a reference, and is declared only on a base schema. The platform also
+  requires a new asset field to be served by the schema's `publicView`. An
+  image cannot be attached in this version (`400` `ASSET_NOT_ATTACHABLE`).
+  Needs platform 0.50.0 or later.
+- **`geocode`** on a field of type `geo` — `{ from: [...] }` names the fields
+  of the same schema that hold its address (at most 10, distinct, each `string`,
+  `enum` or `number`, never `sensitive`). The platform looks up the field's
+  location after each write that changes the address; a record carries its
+  progress in `geocodeStatus`. Record schemas only (refused offline on a schema
+  whose `allowedSurfaces` include `document`). Needs platform 0.50.0 or later.
+- **`publicView`** — makes the type's records readable without signing in,
+  mirroring the platform's schema `publicView`: `mode` (`projection`, the
+  default, copies only the listed `fields`; `record` makes every declared field
+  public), `ownedBy` (`userId` and/or up to two `scope:<namespace>` entries),
+  and optionally `publishWhen` (`{ field, in }`: only records whose field holds
+  one of the values are public) and `search`. Declared on a base schema only,
+  with `allowedSurfaces` omitted or `['record']`; a field that is sensitive or a
+  reference can never be public. `null` removes the view; leaving the key out
+  keeps the stored one. Publishing needs the account's public access, switched
+  on by the account owner with the developer portal API. Where public serving is
+  not open, a read answers `503` `PUBLIC_ACCESS_NOT_LAUNCHED` for an account whose
+  public access is otherwise ready; an account that is not ready gets the `503`
+  code for what is missing first.
+  Needs platform 0.50.0 or later.
 
+  A `projection` view may list a `geo` field and must then say how precisely
+  it is public in `publicView.geoPrecision`: `{ <field>: 'exact' }`, or a whole
+  number of metres from 100 to 100000, the minimum edge of the grid cell whose
+  centre the public copy holds (the record itself keeps the exact location).
+  Changing a published precision, in either direction, counts as making more
+  data public. Needs platform 0.50.0 or later.
+
+### Access: `accessProfile`, `roles` and related elements
+
+`accessProfile` is the scope of the key `bootstrap` mints: an `allowedActions` list of
+`resource:ops` grants, with an optional `dataScope` that narrows which owners' data it reaches.
+The CLI refuses control-plane resources here (its scope gate), so the key stays data-plane only.
 The `accessProfile.dataScope` value lists accept a **`null` sentinel** — e.g.
 `{ "scope:org": ["org_x", null] }` grants `org_x`'s records **plus** tenant-level
 (owner-less / shared) records. Omitting `null` restricts the key to the listed
@@ -298,6 +421,8 @@ forwards it as the platform's `granted_capabilities`, and its scope gate admits 
 `member-lifecycle` and `delegate-principal-stamp`; any other name is refused before anything
 is created.
 
+### `scripts` and `triggers`
+
 A blueprint may declare a top-level **`scripts`** — a map of script name → declaration — carrying
 the source a trigger's `scriptRef` runs. Without it a blueprint can *name* a script but not *ship*
 one, and the adoption flow breaks in the middle: a trigger's `scriptRef` is checked when the rule is
@@ -315,9 +440,9 @@ scripts:
   notify-assignee:
     # The source ships INLINE. There is no `path:` — see below.
     source: |
-      export default function (input) {
-        return { notified: input.recordId };
-      }
+      // A script is a plain (classic) script: its last expression is the result,
+      // and `input` is a global. `export`, a top-level `return` and `await` are syntax errors.
+      ({ notified: input.recordId });
     # Optional, and DESCRIPTIVE only — nothing validates a firing against it.
     declaredInputContract: "{ recordId: string, record: { status: string } }"
 triggers:
@@ -336,6 +461,13 @@ triggers:
   runs, where it surfaces as a script error from the rule that dispatched it.
 - `declaredInputContract` — optional, at most 50,000 UTF-8 bytes. It documents the input shape for a
   human reading the blueprint; nothing enforces it.
+- `inputSchema` — optional: the input contract the platform enforces on every call of the version, in
+  the platform's small JSON Schema dialect (a root `{ type: object }`; `type`, `description`, `enum`;
+  `properties`, `required`, `additionalProperties` on objects; `items` on arrays; at most 5 levels and
+  16,384 bytes). `validate` checks it with the platform's rules. Needs platform 0.50.0 or later.
+- `optInOperations` — optional: the operation names this version declares. The platform decides which
+  names a version may declare; this package checks only that each entry is a string.
+  Needs platform 0.50.0 or later.
 
 Both limits are counted in **UTF-8 bytes, not characters**, matching the platform — a source full of
 multi-byte characters can sit under 300,000 characters and still be over the limit.
@@ -354,7 +486,8 @@ old code with nothing to tell you. A `scriptRef` naming a script this blueprint 
 unrestricted and may still pin a version — that is the "reference a script someone else pushed" case.
 
 **Re-applying an unchanged blueprint pushes nothing.** An apply reads the name's current version
-first and only stores a new one when `source` or `declaredInputContract` actually differs, so a
+first and only stores a new one when `source`, `declaredInputContract`, a declared `inputSchema` or `optInOperations` actually
+differs (an `inputSchema` left out is not compared; an `optInOperations` left out is the empty list), so a
 repeated apply does not accumulate versions or silently re-point a `latest` rule at code identical to
 what it was already running. Editing `source` pushes one new version, which every `latest` rule then
 picks up.
@@ -495,9 +628,12 @@ top of this flag: an account owner can adopt any unmarked name, but one Dev Port
 adopt a name a *different* team member hand-pushed — see the CLI's own `AUTHORING.md` for the full
 mechanism.
 
+### `issuers` and `identityProjectionClaims`
+
 A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
-audience, contextId, subClaim?, emailClaim?, userinfoUri?, restrictedToDomain?, selfSignupPolicies?, capturedClaims? }`.
+audience, contextId, subClaim?, emailClaim?, userinfoUri?, restrictedToDomain?, selfSignupPolicies?, capturedClaims?, acceptedIdTokenClientIds? }`.
+A re-apply replaces the issuer's whole `selfSignupPolicies` list with the one the blueprint declares, including each entry's `additionalRoleIds`: declare every additional role in the blueprint, or the next apply removes it.
 `issuer`, `jwksUri` and, when set, `userinfoUri` must be `https://` URLs in printable ASCII whose
 host is only letters, digits, dots and dashes with an optional port: no userinfo (`@`), percent-encoding,
 bracketed IPv6 literal or non-ASCII host (write an internationalized domain in its punycode `xn--` form).
@@ -533,6 +669,8 @@ One IdP account serving several contexts therefore needs one entry per context,
 each in that context's own blueprint; that is no extra work, since the
 `(issuer, audience)` uniqueness rule already forces a separate entry per context.
 
+**`acceptedIdTokenClientIds`** lists other client ids an ID token from this identity provider may be addressed to, for an app's in-app account deletion (`/v1/me/erasure`) when the registration's `audience` is an API rather than the app (Auth0, for example): up to 10, each non-blank, at most 255 characters, each once. Leaving it out of a later apply keeps the stored list; an empty list keeps only `audience`. Needs platform 0.50.0 or later.
+
 **`capturedClaims`** names additional OIDC claims — beyond `emailClaim`, which keeps its own field —
 to read from this issuer's tokens on every successful exchange and store as your tenant's golden
 identity-provider-asserted copy for the signed-in user. Not a fixed set: name whatever your provider
@@ -554,6 +692,8 @@ applied and an empty list does not disable projection. Change an existing contex
 platform API instead. Like
 `issuers`, it applies in the **bootstrap-token phase** — setting it needs the platform provisioning
 capability, which only that phase's credential carries.
+
+### `namespaces`
 
 A blueprint may also declare top-level **`namespaces`** — entity-namespace
 registrations, each `{ namespace, specificityRank, entityBacked?, membershipRecordType?,
@@ -605,6 +745,8 @@ namespace this includes a collision with a **different** blueprint's (or a manua
 registration of the same name — that always fails rather than being silently adopted,
 since a tenant-wide row is co-owned by no single blueprint.
 
+### `identities`
+
 A blueprint may also declare a top-level **`identities`** — a map of local name →
 principal declaration, each `{ kind, externalId, displayName?, metadata? }`. It
 names principals the blueprint expects to exist so other fields can *reference*
@@ -655,12 +797,16 @@ digit (`demoOrg`, not `demo-org`) — the same grammar a `${{ identities.<name> 
 token itself can match. A name outside it is rejected as a parse error at
 declare time (`validate`/`plan`), not silently accepted as unreferenceable.
 
+### Loader phases
+
 Which top-level fields apply in which loader phase isn't something you have to
 infer or remember: `BLUEPRINT_FIELD_PHASES` (exported alongside `Blueprint`) is a
 `{ fieldName: 'bootstrap' | 'in-context' }` map you can inspect directly —
 `@vectros-ai/cli`'s own `vectros blueprint plan` preview derives its
 `[<phase>-token phase]` annotations from this same map, so the two can't drift.
 `identities` isn't in it, for the reason given above.
+
+### `agents`
 
 A blueprint may declare a top-level **`agents`** — a map of agent name → definition — for the stored
 agents it needs (`/v1/agents`). It requires `formatVersion: 2`, so a tool that predates the format
@@ -687,7 +833,11 @@ agents:
       - { name: records_get }
       - { name: records_create, allowWrites: true }   # a tool that changes data needs allowWrites ...
     limits: { maxToolCalls: 10, maxWrites: 2 }         # ... and limits.maxWrites of at least 1
-    budget: { maxInferenceCents: 100 }
+    budget:
+      maxInferenceCents: 100                           # per run
+      periods:                                         # optional: what all its runs may spend per period
+        - { period: DAY, maxInferenceCents: 2000 }
+        - { period: MONTH, maxInferenceCents: 20000 }
 ```
 
 Each entry is the **current** definition for that name; the platform keeps the versions. Applying an
@@ -695,7 +845,16 @@ unchanged blueprint writes nothing, and editing an entry writes the next version
 place, so every earlier version stays readable. `validate` checks the section offline against the
 platform's limits: at most 50 tools, each named once; `limits.maxWrites` of at least 1 when a tool has
 `allowWrites: true`; `limits.maxToolCalls` not set to 0 when tools are listed; and the name and length
-rules. `authority` (whose identity the agent's tool calls run with) is checked for its shape only, an
+rules.
+
+A tool entry can instead offer a stored script: give it a `script` (`{ name, version }`, the same reference a trigger carries, `version` a version number as a string or `latest`) and, optionally, a `description` for the model (1 to 1,024 characters, on a script tool only). The script version must declare an `inputSchema`; a tool on a script the blueprint ships must use `latest` (a blueprint rule, as for triggers, because the blueprint cannot know which version number its source lands on; the platform itself also accepts a pinned version), and `validate` refuses one whose shipped entry declares no `inputSchema`. The tool's `name` is its own and must not be a catalog tool's. Saving the agent needs a credential allowed to run the script (`scripts:x`), and a run executes it under the run's caller's own credential; the platform checks both. Needs platform 0.50.0 or later.
+
+`budget.periods` caps what all of the agent's runs may spend per `HOUR`, `DAY`, `WEEK` or `MONTH`
+(calendar periods at UTC-05:00, the clock of the monthly bill), at most one cap per period; `validate`
+refuses a period cap below the per-run budget (each run reserves its whole per-run budget while it runs, so
+such a cap could never admit one) and a longer period's cap below a shorter one's (it would make the shorter
+cap unreachable). A period name is checked for its shape only, as `authority` is. A run counts in the periods it
+starts in, and a run that would go over a cap is refused by the platform with `AGENT_BUDGET_EXHAUSTED`. `authority` (whose identity the agent's tool calls run with) is checked for its shape only, an
 upper-case name such as `CALLER`, which is the only value the platform accepts. The model, the
 tool names and the minimum budget are checked by the platform when the blueprint is applied.
 
@@ -708,8 +867,17 @@ retired through the API. Whether
 and how a tool applies the section is up to the tool; `@vectros-ai/cli` creates each agent after the
 roles, scripts and triggers, and its `vectros agents` command group reads and writes the same API.
 
-All of the above are **optional and backward-compatible** — a blueprint that
-omits them parses and provisions exactly as before.
+### `seed`
+
+`seed` lists sample items to create, each with a `surface` (`record` or `document`), the `typeName` of a
+declared schema, and a stable `externalId` (the idempotency key, and the value another seed's `reference`
+field resolves against). A record seed carries its payload in `fields`; a document seed carries `title` and
+non-empty `text`, and may carry `fields`. Optional `scopes` (at most two `namespace:value` entries) set the
+item's ownership; `[]` makes it private to the seeding principal. `vectros bootstrap` creates the seed
+unless you pass `--no-seed`; `vectros blueprint apply` creates it only with `--seed`.
+
+The elements from `roles` through `seed` are **optional and backward-compatible**: a
+blueprint that omits them parses and provisions exactly as before.
 
 ## Inputs
 

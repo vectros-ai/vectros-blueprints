@@ -3,6 +3,43 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.22.0 — 2026-11-14
+
+### Added
+
+- **`publicView.geoPrecision`.** A `projection` public view may list a `geo` field and declares its public precision per field: `'exact'` or a whole number of metres from 100 to 100000, the minimum edge of the grid cell whose centre the public copy holds. Checked offline: every listed `geo` field needs an entry, each entry is in that domain and names a listed `geo` field, and `record` mode takes none. Needs platform 0.50.0 or later.
+- **A `geo` field can declare `geocode: { from: [...] }`: the fields of the same schema that hold its address.** Validated offline: the fields must exist, be `string`, `enum` or `number`, and not be `sensitive`; record schemas only.
+- **`composeBlueprint` composes one blueprint from a root document and part documents**, for a blueprint split across files.
+  Lists concatenate and maps union; a name declared twice is refused with both locations, and a part may declare only
+  `BLUEPRINT_PART_KEYS`. The result's `locate(path)` and `declaredAt(message)` give the `file:line` an issue comes from and, with
+  `stacks:`, what each stack declares. Also exported: `readIncludeDirective`, `mergeStacks`, `parseIssuePath`, `ROOT_STACK`,
+  `BLUEPRINT_ROOT_ONLY_KEYS` and `BlueprintCompositionError`. `parseBlueprint` still refuses `include` and `stacks`: compose first.
+- **An agent's `budget` takes `periods`** (caps per `HOUR`, `DAY`, `WEEK` or `MONTH`) **and `ragMaxInferenceCents`** (the most
+  one run's `rag_ask` answers may cost), and **a tool entry can offer a stored script** (`script`, optional `description`).
+- **A script entry takes `inputSchema` and `optInOperations`.** `validate` checks `inputSchema` against the platform's dialect
+  offline; `inputSchemaIssue`, `storedInputSchemaForm` and `sameJson` are exported. The platform decides which
+  operation names a version may declare.
+- **A self-signup policy takes `additionalRoleIds`** (up to 9; a re-apply replaces the issuer's policy list as a whole, so declare
+  every additional role in the blueprint), and **an issuer takes `acceptedIdTokenClientIds`** (up to 10).
+- **A schema can declare `publicView`, which makes its records readable without signing in.** Where public serving is not open, a read answers `503` `PUBLIC_ACCESS_NOT_LAUNCHED` for an account whose public access is otherwise ready; an account that is not ready gets the `503` code for what is missing first. `null` removes a public view;
+  leaving the key out keeps the stored one. `validate` checks the view offline where it can; the platform checks the rest.
+- **A document schema can be a public-media type** (`fileProfile: PUBLIC_MEDIA`, with optional `mediaKinds`, `maxBytes` and
+  `contentTypes`), and **the `asset` and `assets` field types take `documentTypes`**, the public-media types the field accepts. No
+  public-media image is served in this version, and a record that names one in an asset field is refused (`ASSET_NOT_ATTACHABLE`).
+- **`validate` checks the `geo` field rules offline:** a `geo` field cannot be `sensitive`, `searchable`, an enum, a lookup or a
+  `sortBy` target, or sit on a `user` or `entity` schema. Geo fields are refused unless the pilot is enabled for your account.
+- The schema, script, agent and issuer keys above need platform 0.50.0 or later.
+
+### Changed
+
+- **Breaking (narrow): `validate` refuses the reserved search-index names.** On a record or document schema, a filterable field
+  whose id starts with `_geo_`, or is `publicCopy` or `public_copy_owner` in any letter case, is refused offline, whatever platform it
+  targets. Rename the field or drop `filterable`.
+
+### Fixed
+
+- **The script example in the README now runs.** It used `export default function`, which fails with `SCRIPT_ERROR`.
+
 ## 0.21.0 — 2026-11-07
 
 ### Added

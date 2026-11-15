@@ -323,7 +323,7 @@ they write is owned by them alone.
 session scratch, low-confidence observations being staged, personal notes across
 sessions. A memory *matures by promotion* — when a private note proves durable,
 crystallize it into a `convention`/`gotcha`/`decision` (a curated type the whole
-team reads). One rule keeps memory honest: **your issue tracker owns work-item
+team reads). One rule keeps memory accurate: **your issue tracker owns work-item
 status; memory owns the context around it** — don't let memory become a shadow
 task board.
 
@@ -371,7 +371,7 @@ This is a starting point — fork it for your org:
   does with `category`).
 - **Lookups are migration-locked** — the equality-vs-range choice and the 7 fast
   equality slots per schema are fixed once a schema is live; choose deliberately
-  (see the package README § "The format, field by field").
+  (see the package README § "Schema-level settings", under "The format, element by element").
 - **Sensitive fields** — SDLC knowledge generally isn't PHI, so this blueprint
   marks nothing sensitive; if a field needs redaction (e.g. an internal endpoint in
   a post-mortem), mark it `sensitive` (see the `clinical-intake` blueprint).

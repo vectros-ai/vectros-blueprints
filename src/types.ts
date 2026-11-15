@@ -15,6 +15,7 @@
  * The blueprint's stable id is `name`.
  */
 import { z } from 'zod';
+import { inputSchemaIssue } from './script-input-schema.js';
 
 // AppContext contextId rule mirrors the backend (3-31 chars, starts with a
 // lowercase letter, then lowercase letters/digits/dashes).
@@ -245,6 +246,47 @@ const RenderHintsSchema = z
   })
   .strict();
 
+// An `asset`/`assets` field's own rules, as the platform checks each declaration on a schema write (including its
+// `documentTypes` rule). What depends on the type's stored state (that a NEW asset field needs
+// a public view that serves it, and that an asset field cannot be removed or change type) is left to the platform.
+const ASSET_MAX_IMAGES_PER_FIELD = 20;
+function assetFieldIssues(field: {
+  fieldType: string;
+  documentTypes?: readonly string[];
+  sensitive?: boolean;
+  searchable?: boolean;
+  enumValues?: readonly unknown[];
+  validation?: { maxItems?: number };
+}): Array<[Array<string | number>, string]> {
+  const out: Array<[Array<string | number>, string]> = [];
+  const isAsset = field.fieldType === 'asset' || field.fieldType === 'assets';
+  if (!isAsset) {
+    if (field.documentTypes !== undefined) out.push([['documentTypes'], "documentTypes is allowed only on a field of type 'asset' or 'assets'"]);
+    return out;
+  }
+  const types = field.documentTypes;
+  if (types === undefined || types.length === 0) {
+    out.push([['documentTypes'], 'an asset field must list the document types it accepts in documentTypes']);
+  } else {
+    const seen = new Set<string>();
+    types.forEach((d, i) => {
+      if (d.trim() === '' || seen.has(d)) out.push([['documentTypes', i], 'documentTypes must list each document type once, by name']);
+      seen.add(d);
+    });
+  }
+  if (field.sensitive === true) out.push([['sensitive'], 'an asset field cannot be sensitive, because its images are public while the record is']);
+  if (field.searchable === true) out.push([['searchable'], 'an asset field cannot be searchable']);
+  if (field.enumValues !== undefined && field.enumValues.length > 0) out.push([['enumValues'], 'an asset field cannot declare enumValues']);
+  const maxItems = field.validation?.maxItems;
+  if (maxItems !== undefined) {
+    if (field.fieldType !== 'assets') out.push([['validation', 'maxItems'], "validation.maxItems applies only to a field of type 'assets'"]);
+    else if (maxItems < 1 || maxItems > ASSET_MAX_IMAGES_PER_FIELD) {
+      out.push([['validation', 'maxItems'], `validation.maxItems on an assets field must be from 1 to ${ASSET_MAX_IMAGES_PER_FIELD}`]);
+    }
+  }
+  return out;
+}
+
 const BlueprintFieldDefSchema = z
   .object({
     fieldId: safeDisplayString(z.string().min(1)),
@@ -298,9 +340,26 @@ const BlueprintFieldDefSchema = z
     // `entity` is NOT a target — it names the bind surface, not a location.
     targetSurface: z.string().min(1).optional(),
     cardinality: z.enum(['one', 'many']).optional(),
+    // For a field of type `asset` (one image) or `assets` (up to 20): the public-media document types (their typeName)
+    // the field accepts. Required on both, and allowed only on them.
+    documentTypes: z.array(safeDisplayString(z.string())).optional(),
+    // A geo field may be filled from an address: the same-schema fields holding it, in order.
+    geocode: z.object({ from: z.array(z.string().min(1)) }).strict().optional(),
   })
   .strict()
   .superRefine((field, ctx) => {
+    // A geo field's own rules, as the platform checks the declaration; reference keys are refused by the reference check
+    // below.
+    if (field.fieldType === 'geo') {
+      if (field.sensitive === true) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sensitive'], message: `field '${field.fieldId}' cannot be both geo and sensitive — a sensitive field never enters search, and a geo field exists to be searched` });
+      if (field.searchable === true) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['searchable'], message: `field '${field.fieldId}' cannot be both geo and searchable — coordinates are not full-text` });
+      if (field.enumValues !== undefined && field.enumValues.length > 0) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['enumValues'], message: `field '${field.fieldId}' is a geo field and cannot declare enumValues` });
+    } else if (field.geocode !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['geocode'], message: `field '${field.fieldId}' declares geocode, but only a geo field can be geocoded` });
+    }
+    assetFieldIssues(field).forEach(([path, message]) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `field '${field.fieldId}': ${message}` }),
+    );
     // The platform refuses `inline` together with `sensitive`: a sensitive field is blind-indexed
     // and masked, so keeping a readable copy on the row would defeat it. Caught here so it is an
     // authoring error rather than a 400 partway through an apply.
@@ -380,7 +439,7 @@ const BlueprintLookupFieldSchema = z.union([
       // two together, …) but never a later field alone — declare a separate
       // lookup for that. Record-only: the schema's `allowedSurfaces` must be
       // exactly `['record']` (checked at the schema level below) — the
-      // platform's composite index has no document/user/entity reader yet.
+      // platform's composite index has no document/user/entity reader.
       fieldNames: z.array(safeDisplayString(z.string().min(1))).min(2).max(3).optional(),
       // Not available on a composite (`fieldNames`) lookup — checked below.
       unique: z.boolean().optional(),
@@ -457,6 +516,242 @@ const BlueprintCapabilitiesSchema = z
   })
   .strict();
 
+// The `publicView` block of a schema: makes the type's records readable anonymously. Mirrors the
+// platform's schema `publicView` 1:1 (`mode`, `fields`, `geoPrecision`, `ownedBy`, `publishWhen`, `search`); every other
+// key is refused here, as the platform refuses it. Checked offline: the shape and limits below, and (on the
+// schema) the surface, the ownership rule for projection mode and the fields that can never be public. The
+// platform re-checks all of it and also checks what depends on field details or other stored state: the
+// lookup and type requirements of `publishWhen.field`, value types against the field, and `search`
+// coverage. It is the authority.
+const PUBLIC_VIEW_SEARCH_MODES = ['text', 'semantic', 'hybrid'] as const;
+// How precisely a listed geo field is public: 'exact' (the location as stored) or a whole number of metres, the MINIMUM size of
+// the grid cell whose centre the public copy holds (a cell is somewhat larger away from the equator). Changing a precision on a
+// published type, in either direction, publishes more: the grids of two cell sizes do not line up, so the cells recorded before
+// and after a change overlap in a smaller area than either of them.
+const GEO_PRECISION_MIN_METRES = 100;
+const GEO_PRECISION_MAX_METRES = 100_000;
+const GeoPrecisionValueSchema = z.custom<'exact' | number>(
+  (v) => v === 'exact' || (typeof v === 'number' && Number.isInteger(v) && v >= GEO_PRECISION_MIN_METRES && v <= GEO_PRECISION_MAX_METRES),
+  { message: `a geoPrecision value is 'exact' or a whole number of metres from ${GEO_PRECISION_MIN_METRES} to ${GEO_PRECISION_MAX_METRES}` },
+);
+const BlueprintPublicViewSchema = z
+  .object({
+    mode: z.enum(['record', 'projection']).optional(),
+    fields: z.array(safeDisplayString(z.string().min(1))).min(1).max(50).optional(),
+    ownedBy: z.array(safeDisplayString(z.string().min(1))).min(1).max(3),
+    publishWhen: z
+      .object({
+        field: safeDisplayString(z.string().min(1)),
+        in: z
+          .array(
+            z.union([
+              safeDisplayString(z.string().min(1).max(256)),
+              // The platform's storable-number contract, for every number: within the signed 64-bit range (below 2^63 in
+              // magnitude, about 9.22e18), and zero or a magnitude of at least 1e-130. (Its 38-significant-digit limit
+              // cannot be reached by a JavaScript number, which carries at most 17.)
+              z.number().finite().refine((v) => v === 0 || (Math.abs(v) >= 1e-130 && Math.abs(v) < 2 ** 63), {
+                message: 'a publishWhen.in number must be 0 or have a magnitude from 1e-130 to below 2^63 (about 9.22e18)',
+              }),
+              z.boolean(),
+            ]),
+          )
+          .min(1)
+          .max(20),
+      })
+      .strict()
+      .optional(),
+    search: z.array(z.enum(PUBLIC_VIEW_SEARCH_MODES)).optional(),
+    geoPrecision: z.record(safeDisplayString(z.string().min(1)), GeoPrecisionValueSchema).optional(),
+    // Server-managed and ignored on a write; accepted (any number, as the platform accepts it) so a view copied from a
+    // read can be pasted in unchanged.
+    publicViewVersion: z.number().optional(),
+  })
+  .strict()
+  .superRefine((pv, ctx) => {
+    const mode = pv.mode ?? 'projection';
+    if (mode === 'projection' && pv.fields === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['fields'],
+        message: "publicView mode 'projection' (the default) requires 'fields': the declared fields that are public",
+      });
+    }
+    if (mode === 'record' && pv.fields !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['fields'],
+        message: "publicView mode 'record' makes every declared field public; omit 'fields'",
+      });
+    }
+    if (mode === 'record' && pv.geoPrecision !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['geoPrecision'],
+        message: "publicView mode 'record' serves every field as stored, a geo field exactly; omit 'geoPrecision'",
+      });
+    }
+    let scopeDims = 0;
+    const seen = new Set<string>();
+    for (const [i, dim] of pv.ownedBy.entries()) {
+      if (seen.has(dim)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownedBy', i], message: `publicView.ownedBy names '${dim}' twice` });
+      }
+      seen.add(dim);
+      if (dim === 'userId') continue;
+      if (!dim.startsWith('scope:')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['ownedBy', i],
+          message: `publicView.ownedBy entries are 'userId' or 'scope:<namespace>'; got '${dim}'`,
+        });
+        continue;
+      }
+      const nsError = scopeNamespaceGrammarError(dim.slice('scope:'.length));
+      if (nsError !== null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownedBy', i], message: `publicView.ownedBy: ${nsError}` });
+        continue;
+      }
+      scopeDims++;
+    }
+    if (scopeDims > MAX_SCOPE_DIMENSIONS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ownedBy'],
+        message: `publicView.ownedBy names at most ${MAX_SCOPE_DIMENSIONS} scope namespaces`,
+      });
+    }
+    if (pv.fields && new Set(pv.fields).size !== pv.fields.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fields'], message: 'publicView.fields names a field more than once' });
+    }
+    if (pv.publishWhen && new Set(pv.publishWhen.in.map((v) => `${typeof v}:${String(v)}`)).size !== pv.publishWhen.in.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['publishWhen', 'in'], message: 'publicView.publishWhen.in names a value more than once' });
+    }
+    if (pv.search && new Set(pv.search).size !== pv.search.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['search'], message: 'publicView.search names a mode more than once' });
+    }
+  });
+
+// A public-media document type's rules, as the platform checks them on a schema write:
+// every one is visible in the blueprint, so each is refused here before anything is sent. What needs stored state (adding the
+// profile to a type that already has documents or variants) is left to the platform.
+const PUBLIC_MEDIA_IMAGE_TYPES: readonly string[] = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const PUBLIC_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+function publicMediaSchemaIssues(schema: {
+  fileProfile?: 'PUBLIC_MEDIA';
+  mediaKinds?: readonly string[];
+  maxBytes?: number;
+  contentTypes?: readonly string[];
+  allowedSurfaces?: readonly string[];
+  indexMode?: string;
+  basedOn?: string;
+}): Array<[Array<string | number>, string]> {
+  const out: Array<[Array<string | number>, string]> = [];
+  if (schema.fileProfile === undefined) {
+    for (const key of ['mediaKinds', 'maxBytes', 'contentTypes'] as const) {
+      if (schema[key] !== undefined) out.push([[key], `${key} needs fileProfile 'PUBLIC_MEDIA' declared alongside it`]);
+    }
+    return out;
+  }
+  const s = schema.allowedSurfaces;
+  if (!(s !== undefined && s.length === 1 && s[0] === 'document')) {
+    out.push([['allowedSurfaces'], "a schema with fileProfile 'PUBLIC_MEDIA' needs allowedSurfaces exactly ['document']"]);
+  }
+  if (schema.indexMode !== undefined && schema.indexMode !== 'NONE') {
+    out.push([['indexMode'], "a schema with fileProfile 'PUBLIC_MEDIA' is never indexed: indexMode must be 'NONE' or omitted"]);
+  }
+  if (schema.basedOn !== undefined) {
+    out.push([['basedOn'], "a schema with fileProfile 'PUBLIC_MEDIA' cannot be a customization (basedOn)"]);
+  }
+  if (schema.mediaKinds !== undefined) {
+    if (schema.mediaKinds.length === 0) out.push([['mediaKinds'], 'mediaKinds must name at least one kind, or be omitted']);
+    const seen = new Set<string>();
+    schema.mediaKinds.forEach((k, i) => {
+      if (seen.has(k)) out.push([['mediaKinds', i], 'mediaKinds may not list a kind twice']);
+      else if (k === 'video') out.push([['mediaKinds', i], "media kind 'video' is not supported; use ['image']"]);
+      else if (k !== 'image') out.push([['mediaKinds', i], "mediaKinds may contain only 'image'"]);
+      seen.add(k);
+    });
+  }
+  if (schema.maxBytes !== undefined && (schema.maxBytes < 1 || schema.maxBytes > PUBLIC_MEDIA_MAX_BYTES)) {
+    out.push([['maxBytes'], `maxBytes must be between 1 and ${PUBLIC_MEDIA_MAX_BYTES} (10 MiB) for image media`]);
+  }
+  if (schema.contentTypes !== undefined) {
+    if (schema.contentTypes.length === 0) out.push([['contentTypes'], 'contentTypes must list at least one type, or be omitted']);
+    const seen = new Set<string>();
+    schema.contentTypes.forEach((raw, i) => {
+      // The platform compares and stores each type trimmed and lower-cased.
+      const n = raw.trim().toLowerCase();
+      if (!PUBLIC_MEDIA_IMAGE_TYPES.includes(n)) {
+        out.push([['contentTypes', i], `contentTypes may contain only ${PUBLIC_MEDIA_IMAGE_TYPES.join(', ')}`]);
+      } else if (seen.has(n)) {
+        out.push([['contentTypes', i], 'contentTypes may not list a type twice']);
+      }
+      seen.add(n);
+    });
+  }
+  return out;
+}
+
+// The schema-level rules of a public view that a blueprint shows by itself (the platform's own, checked again there).
+const PUBLIC_FIELD_RESERVED_NAMES: ReadonlySet<string> = new Set(['partnerUserId', 'userId', 'scopes', 'externalId']);
+const MAX_PROJECTION_TYPE_NAME = 64 - 'pv_'.length;
+function publicViewSchemaIssues(schema: {
+  typeName: string;
+  allowedSurfaces?: readonly string[];
+  userId?: string;
+  scopes?: readonly string[];
+  fields: ReadonlyArray<{ fieldId: string; fieldType: string; sensitive?: boolean }>;
+  publicView?: { mode?: 'record' | 'projection'; fields?: readonly string[]; geoPrecision?: Readonly<Record<string, unknown>> } | null;
+}): Array<[Array<string | number>, string]> {
+  const pv = schema.publicView;
+  if (!pv) return [];
+  const out: Array<[Array<string | number>, string]> = [];
+  const surfaces = schema.allowedSurfaces;
+  if (surfaces !== undefined && !(surfaces.length > 0 && surfaces.every((s) => s === 'record'))) {
+    out.push([['allowedSurfaces'], "publicView requires allowedSurfaces to be exactly ['record']: only records can be public"]);
+  }
+  const neverPublic = (f: { fieldId: string; fieldType: string; sensitive?: boolean }): string | null => {
+    if (f.sensitive === true) return `field '${f.fieldId}' is sensitive and can never be public`;
+    if (f.fieldType === 'reference') return `field '${f.fieldId}' is a reference (internal record ids) and can never be public`;
+    if (PUBLIC_FIELD_RESERVED_NAMES.has(f.fieldId)) return `field '${f.fieldId}' is an ownership or identity name and can never be public`;
+    return null;
+  };
+  if ((pv.mode ?? 'projection') === 'record') {
+    schema.fields.forEach((f, i) => {
+      const why = neverPublic(f);
+      if (why !== null) out.push([['fields', i], `publicView mode 'record' makes every declared field public, and ${why}`]);
+    });
+    return out;
+  }
+  if (schema.userId !== undefined || (schema.scopes !== undefined && schema.scopes.length > 0)) {
+    out.push([['publicView', 'mode'], "publicView mode 'projection' is available only on a schema no user or scope owns (no userId, no scopes); use mode 'record'"]);
+  }
+  if (schema.typeName.length > MAX_PROJECTION_TYPE_NAME) {
+    out.push([['typeName'], `publicView mode 'projection' needs a typeName of at most ${MAX_PROJECTION_TYPE_NAME} characters (its public copies are stored as 'pv_<typeName>')`]);
+  }
+  const byId = new Map(schema.fields.map((f) => [f.fieldId, f]));
+  (pv.fields ?? []).forEach((id, i) => {
+    const f = byId.get(id);
+    if (f === undefined) return; // reported by the declared-field check
+    const why = neverPublic(f);
+    if (why !== null) out.push([['publicView', 'fields', i], why]);
+    else if (f.fieldType === 'geo' && (pv.geoPrecision === undefined || !Object.hasOwn(pv.geoPrecision, id))) {
+      out.push([
+        ['publicView', 'fields', i],
+        `field '${id}' is a geo field: set publicView.geoPrecision.${id} to 'exact' (the location as stored) or to a minimum cell size in metres ` +
+          `(${GEO_PRECISION_MIN_METRES} to ${GEO_PRECISION_MAX_METRES}: the public copy holds only the centre of that grid cell)`,
+      ]);
+    }
+  });
+  const listed = new Set(pv.fields ?? []);
+  for (const name of Object.keys(pv.geoPrecision ?? {})) {
+    if (!listed.has(name) || byId.get(name)?.fieldType !== 'geo') {
+      out.push([['publicView', 'geoPrecision', name], `publicView.geoPrecision names '${name}', which is not a geo field listed in publicView.fields`]);
+    }
+  }
+  return out;
+}
+
 const BlueprintSchemaSchema = z
   .object({
     // safeDisplayString: buildPlan's schema step renders this raw into a single summary
@@ -527,11 +822,116 @@ const BlueprintSchemaSchema = z
     // Structural-only here (validated below by `lintExpectedScopeDims`); the
     // cross-referencing lint against role clauses lives in `packages/cli`.
     expectedScopeDims: z.array(z.string().min(1)).max(MAX_SCOPE_DIMENSIONS).optional(),
+    // Makes this type's records public (anonymous read). Declared on a base schema only (never with
+    // `basedOn`). Applying it needs the account's public access switched on (developer portal API) and a
+    // credential holding the `public-publish` capability for the schema's ownership. Omitting it on a
+    // re-apply leaves a stored public view unchanged; `null` removes it.
+    // `.nullable()`, not a union with null: a union reports a refused view as a bare 'Invalid input', hiding the reason.
+    publicView: BlueprintPublicViewSchema.nullable().optional(),
+    // Makes this a public-media document type: a document type for images (the
+    // platform's schema `fileProfile`). It needs `allowedSurfaces: ['document']`; the type is never indexed. Once set, a
+    // later apply that leaves it out keeps it. `mediaKinds` (only `image`), `maxBytes` (at most 10 MiB) and
+    // `contentTypes` (a subset of the four image types) are declared with it. Each is sent only when declared: on create
+    // the platform's default applies, and a later apply that leaves one out keeps the stored value.
+    fileProfile: z.literal('PUBLIC_MEDIA').optional(),
+    mediaKinds: z.array(z.string()).optional(),
+    maxBytes: z.number().int().optional(),
+    contentTypes: z.array(z.string()).optional(),
   })
   .strict()
   .superRefine((schema, ctx) => {
+    // The geo rules that need the whole schema, as the platform checks them: no lookup on a geo field, no sortBy naming one, and
+    // record or document schemas only.
+    const geoIds = new Set(schema.fields.filter((f) => f.fieldType === 'geo').map((f) => f.fieldId));
+    if (geoIds.size > 0) {
+      const surfaces = schema.allowedSurfaces ?? ['record'];
+      if (surfaces.some((s) => s === 'user' || s === 'entity')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allowedSurfaces'], message: `schema '${schema.typeName}': a geo field is supported on record and document schemas only` });
+      }
+      (schema.lookupFields ?? []).forEach((lf, i) => {
+        const legs = typeof lf === 'string' ? [lf] : lf.fieldNames ?? (lf.fieldName !== undefined ? [lf.fieldName] : []);
+        for (const leg of legs) {
+          if (geoIds.has(leg)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lookupFields', i], message: `schema '${schema.typeName}': lookupField cannot use '${leg}': it is a geo field, and a point has no exact-match lookup` });
+        }
+        const sortBy = typeof lf === 'string' ? undefined : lf.sortBy;
+        if (sortBy !== undefined && geoIds.has(sortBy)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lookupFields', i, 'sortBy'], message: `schema '${schema.typeName}': sortBy cannot be '${sortBy}': it is a geo field, and a point has no order to sort by` });
+      });
+      // geocode.from must name fields of THIS schema (not the geo field itself), each a string/enum/number field and not
+      // sensitive: coordinates are searchable and reveal the address.
+      const byId = new Map(schema.fields.map((f) => [f.fieldId, f]));
+      const GEOCODE_SOURCE_TYPES = new Set(['string', 'enum', 'number']);
+      schema.fields.forEach((f, i) => {
+        if (f.fieldType !== 'geo' || f.geocode === undefined) return;
+        // geocoding is supported on record schemas only (the platform refuses it the same way)
+        if ((schema.allowedSurfaces ?? ['record']).includes('document')) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fields', i, 'geocode'], message: `field '${f.fieldId}': geocode is supported on record schemas only` });
+        }
+        const from = f.geocode.from;
+        if (from.length === 0) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fields', i, 'geocode', 'from'], message: `field '${f.fieldId}': geocode.from must name at least one field of this schema holding the address` });
+        }
+        if (from.length > 10) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fields', i, 'geocode', 'from'], message: `field '${f.fieldId}': geocode.from may name at most 10 fields` });
+        }
+        const seen = new Set<string>();
+        from.forEach((src, j) => {
+          const path = ['fields', i, 'geocode', 'from', j] as (string | number)[];
+          if (seen.has(src)) { ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `field '${f.fieldId}': geocode.from names '${src}' more than once` }); return; }
+          seen.add(src);
+          if (src === f.fieldId) { ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `field '${f.fieldId}': geocode.from cannot name the geo field itself` }); return; }
+          const sourceField = byId.get(src);
+          if (sourceField === undefined) { ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `field '${f.fieldId}': geocode.from names '${src}', which is not a field of this schema` }); return; }
+          if (sourceField.sensitive === true) { ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `field '${f.fieldId}': geocode.from cannot use '${src}' because it is sensitive` }); return; }
+          if (!GEOCODE_SOURCE_TYPES.has(sourceField.fieldType)) ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `field '${f.fieldId}': geocode.from cannot use '${src}' (fieldType '${sourceField.fieldType}'). A source field must be a string, enum or number field` });
+        });
+      });
+    }
+    if (schema.basedOn !== undefined) {
+      schema.fields.forEach((f, i) => {
+        if (f.fieldType === 'asset' || f.fieldType === 'assets') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['fields', i, 'fieldType'],
+            message: `schema '${schema.typeName}': an asset field can be declared only on a base schema, not on a customization (basedOn)`,
+          });
+        }
+      });
+    }
+    publicMediaSchemaIssues(schema).forEach(([path, message]) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `schema '${schema.typeName}': ${message}` }),
+    );
+    if (schema.publicView) {
+      publicViewSchemaIssues(schema).forEach(([path, message]) =>
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `schema '${schema.typeName}': ${message}` }),
+      );
+      if (schema.basedOn !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['publicView'],
+          message: `schema '${schema.typeName}': publicView is declared on a base schema only; a customization (basedOn) uses its base's`,
+        });
+      }
+      const declared = new Set(schema.fields.map((f) => f.fieldId));
+      for (const [i, f] of (schema.publicView.fields ?? []).entries()) {
+        if (!declared.has(f)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['publicView', 'fields', i],
+            message: `schema '${schema.typeName}': publicView.fields names '${f}', which is not a declared field`,
+          });
+        }
+      }
+      const pw = schema.publicView.publishWhen;
+      if (pw && !declared.has(pw.field)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['publicView', 'publishWhen', 'field'],
+          message: `schema '${schema.typeName}': publicView.publishWhen.field '${pw.field}' is not a declared field`,
+        });
+      }
+    }
     // A composite ('fieldNames') lookup is record-only — the platform's composite
-    // index has no document/user/entity reader yet. `allowedSurfaces` omitted
+    // index has no document/user/entity reader. `allowedSurfaces` omitted
     // defaults (loader-side) to ['record'], so only an EXPLICIT, different value
     // is a violation here.
     const hasComposite = (schema.lookupFields ?? []).some(
@@ -547,7 +947,7 @@ const BlueprintSchemaSchema = z
         message:
           `schema '${schema.typeName}': a composite ('fieldNames') lookup requires ` +
           "allowedSurfaces to be exactly ['record'] — the platform's composite index has no " +
-          'document/user/entity reader yet',
+          'document/user/entity reader',
       });
     }
   });
@@ -1142,6 +1542,24 @@ const BlueprintScriptEntrySchema = z
           'bytes, not characters)',
       })
       .optional(),
+    /**
+     * The input contract the platform ENFORCES on every call of this script version (unlike `declaredInputContract`, which is
+     * descriptive only): a JSON Schema object in the platform's small dialect (see `inputSchemaIssue`). Part of the version:
+     * changing it pushes a new version. Needs platform 0.50.0 or later.
+     */
+    inputSchema: z
+      .record(z.string(), z.unknown())
+      .superRefine((s, ctx) => {
+        const issue = inputSchemaIssue(s);
+        if (issue !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue });
+      })
+      .optional(),
+    /**
+     * The operation names this script version declares. Part of the version: changing the list pushes a new version. The
+     * platform decides which names a version may declare, and declaring one needs the capability mapped to it; this package
+     * checks only that each entry is a string. Needs platform 0.50.0 or later.
+     */
+    optInOperations: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -1171,10 +1589,29 @@ const AGENT_LIMITS = {
   maxToolCalls: 50,
   maxWrites: 1_000,
   maxInferenceCents: 500,
+  /** The per-run budget the platform fills in when a definition sets none. */
+  defaultMaxInferenceCents: 100,
+  maxPeriodInferenceCents: 10_000_000,
 } as const;
+
+/** The periods the platform knows today, finest first. Used only to order caps; an unknown name is left for the platform to judge. */
+const KNOWN_BUDGET_PERIODS = ['HOUR', 'DAY', 'WEEK', 'MONTH'] as const;
+
+const BlueprintAgentBudgetPeriodSchema = z
+  .object({
+    /**
+     * `HOUR`, `DAY`, `WEEK` or `MONTH` today. Checked here for its SHAPE only, never against a list (the `authority` rule): the platform
+     * refuses a period it does not support when the blueprint is applied, so an older copy of this package never refuses a newer one.
+     */
+    period: z.string().regex(/^[A-Z][A-Z_]{0,15}$/, { message: "a period is an upper-case name such as 'DAY'" }),
+    /** US cents all runs of the agent may spend in the period: at least the per-run budget, at most 10,000,000. */
+    maxInferenceCents: z.number().int().min(1).max(AGENT_LIMITS.maxPeriodInferenceCents),
+  })
+  .strict();
 
 const AGENT_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+const AGENT_TOOL_DESCRIPTION_CHARS = 1024;
 const BlueprintAgentToolSchema = z
   .object({
     /** The tool's name in the platform's tool catalog. Checked against the catalog when the blueprint is applied. */
@@ -1183,8 +1620,27 @@ const BlueprintAgentToolSchema = z
     }),
     /** Required `true` for a tool that creates, changes or deletes data. */
     allowWrites: z.boolean().optional(),
+    /**
+     * Offers a stored script as the tool, by the same `{ name, version }` reference a trigger carries (`version` a version
+     * number as a string, or `latest`). The tool's `name` is then its own (it must not be a catalog tool's name, which the
+     * platform checks), and the script version must declare an `inputSchema`. Needs platform 0.50.0 or later.
+     */
+    script: BlueprintTriggerScriptRefSchema.optional(),
+    /** The model-facing description of a script tool, 1 to 1,024 characters (a script tool only). */
+    description: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((tool, ctx) => {
+    if (tool.description !== undefined && tool.script === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['description'], message: `tool '${tool.name}': description is accepted only on a script tool` });
+    } else if (tool.description !== undefined && (tool.description.trim() === '' || tool.description.length > AGENT_TOOL_DESCRIPTION_CHARS)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['description'],
+        message: `tool '${tool.name}': description must be 1 to ${AGENT_TOOL_DESCRIPTION_CHARS} characters`,
+      });
+    }
+  });
 
 const BlueprintAgentEntrySchema = z
   .object({
@@ -1215,8 +1671,57 @@ const BlueprintAgentEntrySchema = z
       .object({
         /** US cents per run, up to 500. The platform also enforces a minimum and refuses a lower value when the blueprint is applied. */
         maxInferenceCents: z.number().int().min(1).max(AGENT_LIMITS.maxInferenceCents).optional(),
+        /**
+         * Optional caps on what all runs of the agent may spend per calendar period (at UTC-05:00), at most one per period. Each run
+         * reserves its per-run budget against every capped period while it runs, so a cap below the per-run budget could never admit a
+         * run, and a longer period's cap below a shorter one's would make the shorter cap unreachable: both are refused here.
+         */
+        periods: z.array(BlueprintAgentBudgetPeriodSchema).optional(),
+        /**
+         * Optional: the most one run's `rag_ask` answers may cost together, in US cents, from 1 to the per-run budget. Without it they are
+         * bounded only by the run's own budget.
+         */
+        ragMaxInferenceCents: z.number().int().min(1).max(AGENT_LIMITS.maxInferenceCents).optional(),
       })
       .strict()
+      .superRefine((budget, ctx) => {
+        const perRun = budget.maxInferenceCents ?? AGENT_LIMITS.defaultMaxInferenceCents;
+        if (budget.ragMaxInferenceCents !== undefined && budget.ragMaxInferenceCents > perRun) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['ragMaxInferenceCents'],
+            message: `ragMaxInferenceCents (${budget.ragMaxInferenceCents}) may not exceed the per-run budget (${perRun} cents)`,
+          });
+        }
+        if (!budget.periods) return;
+        const seen = new Map<string, number>();
+        budget.periods.forEach((p, i) => {
+          if (seen.has(p.period)) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['periods', i, 'period'], message: `the period '${p.period}' is listed twice` });
+          }
+          seen.set(p.period, p.maxInferenceCents);
+          if (p.maxInferenceCents < perRun) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['periods', i, 'maxInferenceCents'],
+              message: `a period cap must be at least the per-run budget (${perRun} cents): each run reserves its whole per-run budget`,
+            });
+          }
+        });
+        let finer: string | undefined;
+        for (const period of KNOWN_BUDGET_PERIODS) {
+          const cap = seen.get(period);
+          if (cap === undefined) continue;
+          if (finer !== undefined && cap < (seen.get(finer) as number)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['periods'],
+              message: `the ${period} cap (${cap}) is below the ${finer} cap (${seen.get(finer)}), which would make the ${finer} cap unreachable`,
+            });
+          }
+          finer = period;
+        }
+      })
       .optional(),
   })
   .strict();
@@ -1458,6 +1963,9 @@ function assertNoDuplicateClaimNames(field: string) {
 // gate the app-context create itself requires, never an ordinary context-scoped
 // scope. Shape mirrors the SDK's `IssuerRequest` 1:1 so the loader forwards it
 // without a transform.
+/** The most roles a self-signup policy may add after its `roleId` (the platform's limit). */
+const MAX_ADDITIONAL_SELF_SIGNUP_ROLE_IDS = 9;
+
 const BlueprintIssuerSchema = z
   .object({
     /** Short slug identifying this issuer within your account. Immutable once registered. */
@@ -1543,7 +2051,7 @@ const BlueprintIssuerSchema = z
      * exactly one entry exists), a brand-new user is created and bound to that entry's role, no
      * invite required. Every entry must be something you're willing to grant to ANY caller who can
      * present a token from this issuer — a role carrying elevated (provisioning or wildcard) scope
-     * is rejected. Omit entirely to leave self-signup disabled (the default).
+     * is rejected. Omit entirely to leave self-signup disabled (the default). An entry may also name `additionalRoleIds` (up to 9 more roles, none repeating `roleId`), composed after `roleId` onto the new user's profile; the roles together must not carry elevated scope.
      */
     selfSignupPolicies: z
       .array(
@@ -1557,8 +2065,30 @@ const BlueprintIssuerSchema = z
               message:
                 "roleId must be 3-31 chars, start with a lowercase letter, then lowercase letters/digits/dashes (e.g. 'practitioner-member')",
             }),
+            additionalRoleIds: z
+              .array(
+                z.string().regex(ISSUER_ID_RE, {
+                  message:
+                    'each additionalRoleIds entry must be 3-31 chars, start with a lowercase letter, then lowercase letters/digits/dashes',
+                }),
+              )
+              .max(MAX_ADDITIONAL_SELF_SIGNUP_ROLE_IDS)
+              .optional(),
           })
-          .strict(),
+          .strict()
+          .superRefine((p, ctx) => {
+            const seen = new Set<string>([p.roleId]);
+            for (const [i, rid] of (p.additionalRoleIds ?? []).entries()) {
+              if (seen.has(rid)) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  path: ['additionalRoleIds', i],
+                  message: `additionalRoleIds names '${rid}' more than once, or repeats roleId`,
+                });
+              }
+              seen.add(rid);
+            }
+          }),
       )
       .optional(),
     /**
@@ -1602,6 +2132,28 @@ const BlueprintIssuerSchema = z
       })
       .optional()
       .superRefine(assertNoDuplicateClaimNames('capturedClaims')),
+    /**
+     * More client ids an ID token from this identity provider may be addressed to, for an app's in-app account deletion
+     * (`/v1/me/erasure`) when the registration's `audience` is an API rather than the app itself. Up to 10, each non-blank,
+     * at most 255 characters, each once. Omitted on a later apply, the stored list is kept; an empty list keeps only
+     * `audience`. Needs platform 0.50.0 or later.
+     */
+    acceptedIdTokenClientIds: z
+      .array(
+        safeDisplayString(z.string().max(255, { message: 'an acceptedIdTokenClientIds entry must be at most 255 characters' })).refine(
+          (id) => id.trim().length > 0,
+          { message: 'an acceptedIdTokenClientIds entry must not be blank' },
+        ),
+      )
+      .max(10, { message: 'acceptedIdTokenClientIds accepts at most 10 entries' })
+      .optional()
+      .superRefine((ids, ctx) => {
+        const seen = new Set<string>();
+        ids?.forEach((id, i) => {
+          if (seen.has(id)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i], message: `acceptedIdTokenClientIds repeats '${id}' — list each client id once` });
+          seen.add(id);
+        });
+      }),
   })
   .strict();
 
@@ -2427,11 +2979,33 @@ const DOCUMENT_RESERVED_FILTERABLE_FIELD_IDS: ReadonlySet<string> = new Set([
  */
 function lintReservedFilterableFieldIds(value: unknown, ctx: z.RefinementCtx): void {
   const bp = value as { schemas?: Array<{ typeName?: string; allowedSurfaces?: string[];
-    fields?: Array<{ fieldId?: string; filterable?: boolean }> }> };
+    fields?: Array<{ fieldId?: string; fieldType?: string; filterable?: boolean }> }> };
   bp.schemas?.forEach((schema, si) => {
     const surfaces = schema.allowedSurfaces ?? ['record'];
     schema.fields?.forEach((field, fi) => {
-      if (!field?.filterable || !field.fieldId) return;
+      // A geo field is filterable unless it says otherwise (the platform's default for that type).
+      const filterable = field?.filterable ?? field?.fieldType === 'geo';
+      if (!filterable || !field.fieldId) return;
+      // The search-index keys the platform writes itself, on either indexed surface: the `_geo_` prefix (a geo field's
+      // generated keys, matched case-sensitively) and the two public-copy names (matched in any case), as the platform does.
+      if (surfaces.includes('record') || surfaces.includes('document')) {
+        const id = field.fieldId;
+        const reserved = id.startsWith('_geo_')
+          ? "the '_geo_' prefix is reserved for platform search-index keys"
+          : id.toLowerCase() === 'publiccopy' || id.toLowerCase() === 'public_copy_owner'
+            ? 'the names publicCopy and public_copy_owner are reserved for platform search-index keys'
+            : null;
+        if (reserved !== null) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['schemas', si, 'fields', fi, 'filterable'],
+            message:
+              `schema '${schema.typeName ?? si}': field '${id}' cannot be declared filterable — ${reserved}. ` +
+              'Choose a different fieldId, or leave this field non-filterable.',
+          });
+          return;
+        }
+      }
       const collidesWith = new Set<string>();
       if (surfaces.includes('record') && RECORD_RESERVED_FILTERABLE_FIELD_IDS.has(field.fieldId)) {
         for (const k of RECORD_RESERVED_FILTERABLE_FIELD_IDS) collidesWith.add(k);
@@ -2813,9 +3387,39 @@ function lintScripts(value: unknown, ctx: z.RefinementCtx): void {
     // A nested parse failure aborts before this top-level refinement runs, so by the time we are
     // here every `scriptRef` present has a `version`.
     triggers?: Record<string, { scriptRef?: { name?: string; version: string } }>;
+    agents?: Record<string, { tools?: Array<{ name: string; script?: { name?: string; version: string } }> }>;
   };
   const scripts = bp.scripts;
   if (!scripts) return;
+
+  // An agent's script tool on a script THIS blueprint ships: the same `latest` rule as a trigger, for the same reason, and the
+  // shipped entry must declare an `inputSchema` (the platform offers a script as a tool only then).
+  for (const [agentName, agent] of Object.entries(bp.agents ?? {})) {
+    (agent?.tools ?? []).forEach((tool, i) => {
+      const ref = tool.script;
+      if (!ref?.name || !Object.prototype.hasOwnProperty.call(scripts, ref.name)) return;
+      if (ref.version !== 'latest') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['agents', agentName, 'tools', i, 'script', 'version'],
+          message:
+            `agents['${agentName}'] tool '${tool.name}' pins version '${ref.version}' of '${ref.name}', a script THIS blueprint ` +
+            "ships — use version: 'latest'. Version numbers are assigned by the platform, so a pin cannot be known to name the " +
+            'source declared here.',
+        });
+      }
+      const shipped = scripts[ref.name] as { inputSchema?: unknown } | undefined;
+      if (shipped && shipped.inputSchema === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['agents', agentName, 'tools', i, 'script'],
+          message:
+            `agents['${agentName}'] tool '${tool.name}' offers script '${ref.name}', which declares no inputSchema here — the ` +
+            'platform offers a script as a tool only when its version declares one',
+        });
+      }
+    });
+  }
 
   for (const name of Object.keys(scripts)) {
     if (!SCRIPT_NAME_RE.test(name)) {

@@ -37,13 +37,9 @@
  *     personal working notes. A memory matures by PROMOTION — supersede the
  *     private record and re-create it as a curated type — leaving an auditable
  *     trail.
- * A third tier — TEAM working memory (the same `memory` type shared at a group
- * scope, the fresher layer members write for each other) — is a planned
- * addition, deferred while the shared-scope ownership axis is finalized so the
- * blueprint does not bake a shape that is about to change. When it lands, the
- * SAME `memory` type serves it (the tier is a role clause + a write-time scope
- * choice, not a new schema). Meanwhile: status of tracked work belongs in your
- * issue tracker; memory holds the context AROUND it.
+ * There is no TEAM working-memory tier (the same `memory` type shared at a
+ * group scope). Status of tracked work belongs in your issue tracker; memory
+ * holds the context AROUND it.
  *
  * No bundled SEED in this version: the content artifacts live on the document
  * surface and the cross-surface graph is populated by the ingest agent (the
@@ -835,8 +831,8 @@ const agenticSdlc: Blueprint = {
       // shared records above — which are the team's GLOBAL, curated knowledge —
       // `memory` is per-principal: a fact an agent (or the human it works for)
       // records for ITSELF, isolated by ownership via a `${{ self.userId }}`
-      // role dataScope (the private tier; a team tier keyed on a shared scope is
-      // a deliberate future addition, not baked in this version). Deliberately a
+      // role dataScope (the private tier; this blueprint has no team tier keyed
+      // on a shared scope). Deliberately a
       // SINGLE flexible type so the recall hook queries ONE typeName; the flavor
       // is the `kind` field, mirroring the file-memory taxonomy it replaces, so
       // migration is 1:1. Isolation is enforced by the ROLE (type-scoped
@@ -1268,11 +1264,9 @@ const agenticSdlc: Blueprint = {
     //      private memory.
     //   2) PRIVATE memory: the member's OWN `memory` records, isolated per-request
     //      by `${{ self.userId }}` (the principal dimension — the stable ownership
-    //      axis, unaffected by the evolution of shared/team scopes).
-    // Team-shared *working* memory (a group-owned tier every member reads and
-    // writes) is a planned addition, intentionally NOT in this version: it rides
-    // the ownership axis for shared scopes, which is being finalized, and this
-    // blueprint avoids baking a shape that is about to change. Bind with
+    //      axis).
+    // There is no team-shared *working* memory (a group-owned tier every member
+    // reads and writes). Bind with
     // `vectros join agentic-sdlc --role member`; verify a binding with
     // `vectros access explain --principal me --context agentic-sdlc`.
     member: [

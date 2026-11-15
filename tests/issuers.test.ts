@@ -330,3 +330,35 @@ test('isRestrictedToDomainName is the schema grammar: it accepts and rejects exa
     assert.equal(isRestrictedToDomainName(value), parses, `disagreement for ${JSON.stringify(value)}`);
   }
 });
+
+test('issuers: selfSignupPolicies accepts additionalRoleIds after roleId', () => {
+  const bp = parseBlueprint(
+    minimal({
+      issuers: [{ ...VALID_ISSUER, selfSignupPolicies: [{ signupType: 'member', roleId: 'app-user', additionalRoleIds: ['org-owner', 'org-member'] }] }],
+    }),
+  );
+  assert.deepEqual(bp.issuers?.[0].selfSignupPolicies?.[0].additionalRoleIds, ['org-owner', 'org-member']);
+});
+
+test('issuers: additionalRoleIds is refused over 9 entries, with a repeat, repeating roleId, or a malformed id', () => {
+  const policy = (additionalRoleIds: string[]) =>
+    minimal({ issuers: [{ ...VALID_ISSUER, selfSignupPolicies: [{ signupType: 'member', roleId: 'app-user', additionalRoleIds }] }] });
+  const ten = Array.from({ length: 10 }, (_, i) => `role-${i}`);
+  assert.ok(issuePaths(policy(ten)).length > 0, 'more than 9');
+  assert.ok(issuePaths(policy(Array.from({ length: 9 }, (_, i) => `role-${i}`))).length === 0, 'exactly 9 is accepted');
+  assert.ok(issuePaths(policy(['org-owner', 'org-owner'])).length > 0, 'a repeat');
+  assert.ok(issuePaths(policy(['app-user'])).length > 0, 'repeats roleId');
+  assert.ok(issuePaths(policy(['Org_Owner'])).length > 0, 'malformed');
+});
+
+test('issuers: acceptedIdTokenClientIds takes up to 10 non-blank ids of at most 255 characters, each once', () => {
+  const at = (ids: unknown) => issuePaths(minimal({ issuers: [{ ...VALID_ISSUER, acceptedIdTokenClientIds: ids }] } as never));
+  assert.deepEqual(at(['ios-app', 'android-app']), []);
+  assert.deepEqual(at([]), [], 'an empty list keeps only the audience');
+  assert.deepEqual(at(Array.from({ length: 10 }, (_, i) => `c${i}`)), []);
+  assert.ok(at(Array.from({ length: 11 }, (_, i) => `c${i}`)).length > 0, 'eleven');
+  assert.ok(at([' ']).length > 0, 'blank');
+  assert.ok(at(['x'.repeat(256)]).length > 0, 'too long');
+  assert.deepEqual(at(['x'.repeat(255)]), []);
+  assert.ok(at(['a', 'a']).some((p) => /acceptedIdTokenClientIds/.test(p)), 'repeated');
+});

@@ -194,3 +194,76 @@ test('the refused invisible ranges are refused at both ends and in between, and 
   for (const code of refused) assert.equal(modelIsRefused(code), true, `U+${code.toString(16)} is refused`);
   for (const code of [0x2065, 0x180d, 0xfffc, 0xfff8, 0x115e, 0x1161, 0x3163, 0x3165, 0xff9f, 0xffa1, 0x1bc9f, 0x1bca4, 0x1d172, 0x1d17b, 0xfe0f, 0x0600, 0x034f]) assert.equal(modelIsRefused(code), false, `U+${code.toString(16)} is next to a refused range, not in one`);
 });
+
+// Per-period caps on an agent's budget, checked offline the way the platform checks them
+const withPeriods = (budget: Record<string, unknown>) => minimal({ formatVersion: 2, agents: { triage: { ...triage, budget } } });
+
+test('budget.periods parses: one cap per period, any order, the per-run default applies when none is set', () => {
+  const bp = parseBlueprint(withPeriods({ periods: [{ period: 'MONTH', maxInferenceCents: 5000 }, { period: 'DAY', maxInferenceCents: 100 }] }));
+  assert.equal(bp.agents?.['triage']?.budget?.periods?.length, 2);
+  assert.doesNotThrow(() => parseBlueprint(withPeriods({ maxInferenceCents: 50, periods: [{ period: 'HOUR', maxInferenceCents: 50 }] })));
+  assert.doesNotThrow(() => parseBlueprint(withPeriods({ periods: [{ period: 'DAY', maxInferenceCents: 10_000_000 }] })));
+});
+
+test('budget.ragMaxInferenceCents: 1 up to the per-run budget (100 cents when none is set)', () => {
+  assert.equal(parseBlueprint(withPeriods({ maxInferenceCents: 50, ragMaxInferenceCents: 20 })).agents?.['triage']?.budget?.ragMaxInferenceCents, 20);
+  assert.doesNotThrow(() => parseBlueprint(withPeriods({ maxInferenceCents: 50, ragMaxInferenceCents: 50 })));
+  assert.doesNotThrow(() => parseBlueprint(withPeriods({ ragMaxInferenceCents: 100 })));
+  assert.throws(() => parseBlueprint(withPeriods({ maxInferenceCents: 50, ragMaxInferenceCents: 51 })), /may not exceed the per-run budget \(50 cents\)/);
+  assert.throws(() => parseBlueprint(withPeriods({ ragMaxInferenceCents: 101 })), /may not exceed the per-run budget \(100 cents\)/);
+  assert.throws(() => parseBlueprint(withPeriods({ ragMaxInferenceCents: 0 })));
+  assert.throws(() => parseBlueprint(withPeriods({ ragMaxInferenceCents: 2.5 })));
+});
+
+test('budget.periods refuses what no one could use', () => {
+  const refused: Array<[Record<string, unknown>, RegExp]> = [
+    [{ periods: [{ period: 'DAY', maxInferenceCents: 99 }] }, /at least the per-run budget \(100 cents\)/],
+    [{ maxInferenceCents: 200, periods: [{ period: 'DAY', maxInferenceCents: 150 }] }, /at least the per-run budget \(200 cents\)/],
+    [{ periods: [{ period: 'DAY', maxInferenceCents: 500 }, { period: 'DAY', maxInferenceCents: 600 }] }, /listed twice/],
+    [{ periods: [{ period: 'DAY', maxInferenceCents: 500 }, { period: 'WEEK', maxInferenceCents: 400 }] }, /WEEK cap \(400\) is below the DAY cap/],
+    [{ periods: [{ period: 'DAY', maxInferenceCents: 10_000_001 }] }, /./],
+    [{ periods: [{ period: 'day', maxInferenceCents: 500 }] }, /upper-case name/],
+    [{ periods: [{ period: 'DAY' }] }, /./],
+    [{ periods: [{ period: 'DAY', maxInferenceCents: 500, extra: true }] }, /./],
+  ];
+  for (const [budget, message] of refused) {
+    const found = issues(withPeriods(budget));
+    assert.ok(found.some((i) => i.path.startsWith('agents') && message.test(i.message)), `${JSON.stringify(budget)}: ${JSON.stringify(found)}`);
+  }
+});
+
+test('an unknown period name is left to the platform: this package never refuses a period a newer platform accepts', () => {
+  assert.doesNotThrow(() => parseBlueprint(withPeriods({ periods: [{ period: 'QUARTER', maxInferenceCents: 900 }, { period: 'DAY', maxInferenceCents: 100 }] })));
+});
+
+// ── script tools ──
+
+const scriptTool = (extra: Record<string, unknown> = {}) => ({ name: 'find_listing', script: { name: 'find', version: 'latest' }, ...extra });
+const withScriptAgent = (tool: Record<string, unknown>, scripts?: Record<string, unknown>) =>
+  minimal({ formatVersion: 2, agents: { helper: { ...triage, tools: [{ name: 'records_get' }, tool] } }, ...(scripts ? { scripts } : {}) });
+const msgs = (input: unknown) => issues(input).map((i) => `${i.path}: ${i.message}`);
+
+test('script tools: a tool offering a stored script parses, with an optional description, and is kept as written', () => {
+  const tool = scriptTool({ description: 'Find a listing by text.' });
+  assert.deepEqual(msgs(withScriptAgent(tool)), []);
+  assert.deepEqual(parseBlueprint(withScriptAgent(tool)).agents?.helper.tools?.[1], tool);
+  assert.deepEqual(msgs(withScriptAgent(scriptTool({ script: { name: 'find', version: '3' } }))), [], 'a pin on a script this blueprint does not ship is fine');
+});
+
+test('script tools: description only on a script tool, 1 to 1,024 characters; the reference follows the trigger rule', () => {
+  assert.ok(msgs(withScriptAgent({ name: 'records_list', description: 'x' })).some((m) => /description is accepted only on a script tool/.test(m)));
+  assert.ok(msgs(withScriptAgent(scriptTool({ description: ' ' }))).some((m) => /description must be 1 to 1024 characters/.test(m)));
+  assert.ok(msgs(withScriptAgent(scriptTool({ description: 'x'.repeat(1025) }))).some((m) => /description must be 1 to 1024/.test(m)));
+  assert.deepEqual(msgs(withScriptAgent(scriptTool({ description: 'x'.repeat(1024) }))), []);
+  assert.ok(msgs(withScriptAgent(scriptTool({ script: { name: 'find', version: 'v2' } }))).some((m) => /scriptRef\.version 'v2' is invalid/.test(m)));
+  assert.ok(msgs(withScriptAgent(scriptTool({ script: { name: 'find' } }))).length > 0, 'version is required');
+});
+
+test('script tools on a script THIS blueprint ships: latest only, and the shipped entry must declare an inputSchema', () => {
+  const shipped = { find: { source: '({ ok: true });', inputSchema: { type: 'object' } } };
+  assert.deepEqual(msgs(withScriptAgent(scriptTool(), shipped)), []);
+  assert.ok(msgs(withScriptAgent(scriptTool({ script: { name: 'find', version: '2' } }), shipped)).some((m) => /pins version '2' of 'find', a script THIS blueprint ships/.test(m)));
+  assert.ok(
+    msgs(withScriptAgent(scriptTool(), { find: { source: '({ ok: true });' } })).some((m) => /declares no inputSchema here/.test(m)),
+  );
+});

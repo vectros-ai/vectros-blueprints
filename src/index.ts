@@ -58,6 +58,22 @@ export {
   type InputScalar,
 } from './inputs.js';
 
+export {
+  composeBlueprint,
+  readIncludeDirective,
+  mergeStacks,
+  parseIssuePath,
+  BlueprintCompositionError,
+  BLUEPRINT_PART_KEYS,
+  BLUEPRINT_ROOT_ONLY_KEYS,
+  ROOT_STACK,
+  type BlueprintPartKey,
+  type BlueprintSource,
+  type BlueprintIncludeDirective,
+  type ComposedBlueprint,
+  type StackContents,
+} from './compose.js';
+
 import type { Blueprint } from './types.js';
 import taskManagement from './blueprints/task-management.js';
 import agenticSdlc from './blueprints/agentic-sdlc.js';
@@ -83,3 +99,4 @@ export const BLUEPRINT_NAMES: readonly string[] = BUNDLED_BLUEPRINTS.map((b) => 
 export function getBlueprint(name: string): Blueprint | undefined {
   return BUNDLED_BLUEPRINTS.find((b) => b.name === name);
 }
+export { inputSchemaIssue, storedInputSchemaForm, sameJson } from './script-input-schema.js';
