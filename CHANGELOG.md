@@ -3,6 +3,33 @@
 All notable changes to `@vectros-ai/blueprints` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.23.0 — 2026-11-25
+
+### Added
+
+- **`appContext`**: a blueprint can now declare the app context's own settings: `description` (at most 500 characters), `readAccessLogDefault`, `meteringAxis` (`user` or `scope:<namespace>`), `principalBurstLimit` and `principalUsageCap` (each at least 1), `allowSelfErasure` and `selfErasureGraceDays` (0 to 30). A create sends each one declared. A re-apply updates the first five to the declared values, and a key left out keeps the stored value. `allowSelfErasure` and `selfErasureGraceDays` are set only when the apply creates the context: a re-apply that declares a different value reports it and changes nothing, because changing them needs the account owner's own credential.
+- **`capabilities`** takes four more keys: `ttlEligible` (default off: records may carry `expiresAt`), `strict` (default off: a payload key the schema does not declare is refused), `validateReferences` (default on: a reference must point at a record that exists when written) and `readAccessLog` (whether reads are logged; left out, the app context's default applies). A declared `capabilities` block is laid over the live one: a capability the block leaves out keeps its live value, and `false` turns one off.
+- **`storageProfile`** on a schema: where a record's payload is stored. `STANDARD` is the default, `LOW_LATENCY` is always inline, and `LARGE_PAYLOAD` is always stored out of line, lifting the 400 KB limit (not with a public view in mode `record`). Left out, the stored value is kept.
+- **`itemType`** on an array field: the element type (`string`, `number`, `boolean`, `date` or `instant`). Needs platform 0.51.0 or later.
+- **`writePolicy` on a schema** (a write fence): per operation, the scripts that may make that write, by name (a script this blueprint
+  ships) or by `sha256` seal, with `paths` and, for a trigger, the blueprint's `triggers`. Base schemas with `allowedSurfaces: ['record']`
+  only. Needs platform 0.51.0 or later.
+- **`publicView.cacheSeconds` (0 to 86400) and `publicView.purgeListsOnChange`.** Needs platform 0.51.0 or later. The README says what `publicView.purgeListsOnChange` purges (the cached answers that held a record when it changes while it stays public, within the public budget and an hourly cap) and that a record that newly becomes public shows in a cached list or search when its cached copy expires.
+- **`scripts.<name>.destinations`**: the destinations (by alias) a script may call. A declaration that `vectros blueprint apply` checks and never grants; a blueprint never holds a credential. Needs platform 0.51.0 or later.
+
+### Changed
+
+- The README says what deleting an app context does to an issuer whose users signed in through it: its issuerId is retired, and only the same provider can register it again.
+- More of the platform's rules are checked offline: name grammar, the reserved `pv_` prefix, mixed identity surfaces, a lookup declared twice, `sensitive` with `searchable`, a searchable reference, `sortBy` and `rangeEnabled` on a sensitive field, an owner on a customization, the write fence's owner and entries, an empty `dataScope` value list, public search coverage, the `vectros-admin` context, the context name length, `companyName` (at most 100 characters), at most one issuer, and the self-signup policy limits.
+- An empty `companyName` is accepted, as the platform accepts it; it was refused.
+- The README no longer says a public read can answer `503 PUBLIC_ACCESS_NOT_LAUNCHED`.
+- The README's `fieldType` list names every supported type: `instant` (platform 0.51.0 or later), and the `geo`, `asset` and `assets` types it had missed. It also notes that `instant` fields order chronologically in a `rangeEnabled` lookup.
+- **`validate` checks `publicView.publishWhen` as the platform does**: its field must be a filterable `string`, `enum`,
+  `number` or `boolean` field that is not sensitive and is a lookup field of its own, and each value must have the field's type (for an
+  `enum`, be one of its `enumValues`). A blueprint the platform would refuse is now refused before anything is sent.
+- The README's `documentTypes` entry: from platform 0.51.0 an asset field may be declared on any base schema, and its images
+  are public only while the record is public. The validator's rules are unchanged (it never checked for a `publicView`).
+
 ## 0.22.0 — 2026-11-14
 
 ### Added

@@ -100,8 +100,8 @@ test('issuers: REJECTS an unknown key (.strict())', () => {
   assert.ok(paths.length > 0, `expected an unrecognized-key issue, got ${JSON.stringify(paths)}`);
 });
 
-test('issuers: accepts multiple entries (e.g. live + test tenants on one IdP account, distinct audience)', () => {
-  const bp = parseBlueprint(
+test('issuers: REFUSES a second entry: an app context has at most one issuer, and every entry targets the blueprint context', () => {
+  const paths = issuePaths(
     minimal({
       issuers: [
         VALID_ISSUER,
@@ -109,7 +109,7 @@ test('issuers: accepts multiple entries (e.g. live + test tenants on one IdP acc
       ],
     }),
   );
-  assert.equal(bp.issuers?.length, 2);
+  assert.deepEqual(paths, ['issuers']);
 });
 
 // ---------------------------------------------------------------------------
@@ -164,8 +164,10 @@ test('issuers: the check is per-entry — a valid entry does not excuse a diverg
   // that happens to contain a 1. And assert there is exactly ONE issue — without that, a rule that
   // wrongly flagged the VALID sibling at index 0 as well would still pass this test, which would
   // defeat the "per-entry" claim the test's own name makes.
-  assert.deepEqual(paths, ['issuers[1].contextId'],
-    `expected exactly one issue, at index 1, got ${JSON.stringify(paths)}`);
+  // (Two entries are also refused as a whole, at 'issuers': a context has at most one issuer. That issue is not this rule's.)
+  const perEntry = paths.filter((p) => p !== 'issuers');
+  assert.deepEqual(perEntry, ['issuers[1].contextId'],
+    `expected exactly one per-entry issue, at index 1, got ${JSON.stringify(paths)}`);
 });
 
 // ── capturedClaims (0.43.0) ──────────────────────────────────────────────

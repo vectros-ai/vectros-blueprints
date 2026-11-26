@@ -247,8 +247,8 @@ const RenderHintsSchema = z
   .strict();
 
 // An `asset`/`assets` field's own rules, as the platform checks each declaration on a schema write (including its
-// `documentTypes` rule). What depends on the type's stored state (that a NEW asset field needs
-// a public view that serves it, and that an asset field cannot be removed or change type) is left to the platform.
+// `documentTypes` rule). What depends on the type's stored state (that an asset field cannot be removed or change
+// type) is left to the platform.
 const ASSET_MAX_IMAGES_PER_FIELD = 20;
 function assetFieldIssues(field: {
   fieldType: string;
@@ -274,7 +274,7 @@ function assetFieldIssues(field: {
       seen.add(d);
     });
   }
-  if (field.sensitive === true) out.push([['sensitive'], 'an asset field cannot be sensitive, because its images are public while the record is']);
+  if (field.sensitive === true) out.push([['sensitive'], 'an asset field cannot be sensitive']);
   if (field.searchable === true) out.push([['searchable'], 'an asset field cannot be searchable']);
   if (field.enumValues !== undefined && field.enumValues.length > 0) out.push([['enumValues'], 'an asset field cannot declare enumValues']);
   const maxItems = field.validation?.maxItems;
@@ -287,10 +287,20 @@ function assetFieldIssues(field: {
   return out;
 }
 
+// The field types the platform accepts today. The format does not refuse another type: a newer platform may accept it, and
+// an older copy of this package must not refuse what a newer platform accepts. The CLI's lint warns about a type outside this
+// list, and the platform decides when it writes the schema.
+export const FIELD_TYPES = [
+  'string', 'number', 'boolean', 'date', 'instant', 'enum', 'array', 'object', 'reference', 'geo', 'asset', 'assets',
+] as const;
+
 const BlueprintFieldDefSchema = z
   .object({
     fieldId: safeDisplayString(z.string().min(1)),
     fieldType: z.string().min(1),
+    // The element type of an `array` field (the platform accepts string, number, boolean, date and instant today, and
+    // checks the value; this package checks only that it is a non-empty name on an array field). Platform 0.51.0 and later.
+    itemType: z.string().min(1).optional(),
     required: z.boolean().optional(),
     searchable: z.boolean().optional(),
     filterable: z.boolean().optional(),
@@ -505,25 +515,116 @@ const BlueprintLookupFieldSchema = z.union([
 // platform), and the two capabilities are independent — turning audit history
 // off does not turn triggers off.
 //
-// Note that a schema update replaces `capabilities` in full when the block is
-// supplied, so declaring other capabilities without `triggersEnabled` clears it.
-// The platform refuses that while trigger rules still reference the schema, but
-// keep it declared rather than relying on the refusal.
+// `ttlEligible` — platform default false: records of the type may carry `expiresAt`. `strict` — default false: a
+// payload key the schema does not declare is refused. `validateReferences` — default true: a reference field's target
+// must exist when the record is written (false allows loading records in any order). `readAccessLog` — whether reads
+// of the type are logged; omitted, the app context's default applies.
+//
+// A declared block is laid over the live capabilities: a key the block leaves out keeps its live value, and a key is
+// turned off by declaring it `false`. A schema with no block keeps its stored capabilities.
 const BlueprintCapabilitiesSchema = z
   .object({
     auditHistory: z.boolean().optional(),
     triggersEnabled: z.boolean().optional(),
+    ttlEligible: z.boolean().optional(),
+    strict: z.boolean().optional(),
+    validateReferences: z.boolean().optional(),
+    readAccessLog: z.boolean().optional(),
   })
   .strict();
 
+// The `writePolicy` block of a schema (a write fence): per operation, the script versions through which that operation is
+// admitted; every other write of the type is refused, whoever the caller is. A `via` entry names a script: one this blueprint
+// ships (`script` only: the CLI computes its seal from the declared source, operations and input schema), or any other script
+// version by its `sha256` seal. `paths` defaults to ['execute']; a 'trigger' path names the blueprint's trigger rules
+// (`triggers`) it admits, and a 'tool' path the agent definition ids (`agentIds`). The platform enforces it in addition to the
+// caller's own permissions, never instead of them.
+const WRITE_POLICY_PATHS = ['execute', 'trigger', 'tool'] as const;
+const BlueprintWritePolicyViaSchema = z
+  .object({
+    script: z.string().min(1),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/, { message: 'sha256 must be the 64-character lowercase hex seal of the script version' }).optional(),
+    paths: z.array(z.enum(WRITE_POLICY_PATHS)).min(1).optional(),
+    triggers: z.array(z.string().min(1)).min(1).max(50).optional(),
+    agentIds: z.array(z.string().min(1).refine((id) => id !== 'inline', { message: "agentIds may not name 'inline': an inline run is not a stored agent" })).min(1).max(50).optional(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    const paths = v.paths ?? ['execute'];
+    if (paths.includes('trigger') !== (v.triggers !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['triggers'], message: "'triggers' is required with, and only with, the 'trigger' path" });
+    }
+    if (paths.includes('tool') !== (v.agentIds !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['agentIds'], message: "'agentIds' is required with, and only with, the 'tool' path" });
+    }
+  });
+const BlueprintWritePolicyOperationSchema = z.object({ via: z.array(BlueprintWritePolicyViaSchema).max(50) }).strict();
+export const BlueprintWritePolicySchema = z
+  .object({
+    create: BlueprintWritePolicyOperationSchema.optional(),
+    update: BlueprintWritePolicyOperationSchema.optional(),
+    delete: BlueprintWritePolicyOperationSchema.optional(),
+  })
+  .strict();
+export type BlueprintWritePolicy = z.infer<typeof BlueprintWritePolicySchema>;
+
 // The `publicView` block of a schema: makes the type's records readable anonymously. Mirrors the
-// platform's schema `publicView` 1:1 (`mode`, `fields`, `geoPrecision`, `ownedBy`, `publishWhen`, `search`); every other
+// platform's schema `publicView` 1:1 (`mode`, `fields`, `geoPrecision`, `ownedBy`, `publishWhen`, `search`, `cacheSeconds`,
+// `purgeListsOnChange`); every other
 // key is refused here, as the platform refuses it. Checked offline: the shape and limits below, and (on the
 // schema) the surface, the ownership rule for projection mode and the fields that can never be public. The
-// platform re-checks all of it and also checks what depends on field details or other stored state: the
-// lookup and type requirements of `publishWhen.field`, value types against the field, and `search`
-// coverage. It is the authority.
+// platform re-checks all of it and also checks what depends on other stored state (`search` coverage, existing records). The
+// lookup and type requirements of `publishWhen.field` and the value types against the field are checked offline too
+// (`publishWhenIssues`). The platform is the authority.
 const PUBLIC_VIEW_SEARCH_MODES = ['text', 'semantic', 'hybrid'] as const;
+
+// The platform's rules for `publishWhen.field` and `publishWhen.in` that depend on the field's declaration (the shape and the 1 to 20
+// distinct values are the zod schema's): checked offline so `validate` and `plan` refuse what the platform would. The field must not be
+// sensitive, must be a string, enum, number or boolean field, must be filterable (an omitted `filterable` is false for these types), and
+// must be a single-field lookup of its own; each value must have the field's type, and for an enum with enumValues be one of them.
+const PUBLISH_WHEN_TYPES = ['boolean', 'enum', 'number', 'string'] as const;
+function publishWhenIssues(
+  schema: {
+    fields: ReadonlyArray<{ fieldId: string; fieldType: string; sensitive?: boolean; filterable?: boolean; enumValues?: readonly string[] }>;
+    lookupFields?: ReadonlyArray<string | { fieldName?: string; fieldNames?: readonly string[] }>;
+  },
+  pw: { field: string; in: ReadonlyArray<string | number | boolean> },
+): Array<[Array<string | number>, string]> {
+  const out: Array<[Array<string | number>, string]> = [];
+  const fd = schema.fields.find((f) => f.fieldId === pw.field);
+  if (!fd) return out;
+  if (fd.sensitive === true) {
+    out.push([['field'], `publicView.publishWhen.field '${pw.field}' is sensitive; publication cannot depend on a sensitive field`]);
+    return out;
+  }
+  const type = fd.fieldType || 'string';
+  if (!(PUBLISH_WHEN_TYPES as readonly string[]).includes(type)) {
+    out.push([['field'], `publicView.publishWhen.field '${pw.field}' has type '${type}'; it must be one of ${PUBLISH_WHEN_TYPES.join(', ')}`]);
+    return out;
+  }
+  if (fd.filterable !== true) {
+    out.push([['field'], `publicView.publishWhen.field '${pw.field}' must be filterable (public search pushes it into the index as a mandatory filter)`]);
+  }
+  const ownLookup = (schema.lookupFields ?? []).some((lf) =>
+    typeof lf === 'string' ? lf === pw.field : lf.fieldName === pw.field && lf.fieldNames === undefined,
+  );
+  if (!ownLookup) {
+    out.push([['field'], `publicView.publishWhen.field '${pw.field}' must be declared as a lookup field of its own (the public listing leads with it)`]);
+  }
+  const enumValues = type === 'enum' && fd.enumValues && fd.enumValues.length > 0 ? new Set(fd.enumValues) : undefined;
+  pw.in.forEach((v, i) => {
+    const typed = type === 'number' ? typeof v === 'number' : type === 'boolean' ? typeof v === 'boolean' : typeof v === 'string';
+    if (!typed || (enumValues !== undefined && !enumValues.has(v as string))) {
+      const what = type === 'number' ? 'numbers' : type === 'boolean' ? 'booleans' : 'non-empty strings of at most 256 characters';
+      out.push([
+        ['in', i],
+        `publicView.publishWhen.in values must be ${what}, to match field '${pw.field}' of type '${type}'` +
+          (type === 'enum' ? ", and each one of the field's enumValues" : ''),
+      ]);
+    }
+  });
+  return out;
+}
 // How precisely a listed geo field is public: 'exact' (the location as stored) or a whole number of metres, the MINIMUM size of
 // the grid cell whose centre the public copy holds (a cell is somewhat larger away from the equator). Changing a precision on a
 // published type, in either direction, publishes more: the grids of two cell sizes do not line up, so the cells recorded before
@@ -562,6 +663,12 @@ const BlueprintPublicViewSchema = z
       .optional(),
     search: z.array(z.enum(PUBLIC_VIEW_SEARCH_MODES)).optional(),
     geoPrecision: z.record(safeDisplayString(z.string().min(1)), GeoPrecisionValueSchema).optional(),
+    // How long, in seconds, the edge may serve a public answer of this type from its cache (0, the default on a first
+    // declaration, never caches; `vectros blueprint apply` keeps the live value when a re-apply leaves it out); at most one day. A take-down purges the cached answers that held the record.
+    cacheSeconds: z.number().int().min(0).max(86_400).optional(),
+    // Also purge the cached list pages of the type when one of its records changes (default false: only the pages that held
+    // the record).
+    purgeListsOnChange: z.boolean().optional(),
     // Server-managed and ignored on a write; accepted (any number, as the platform accepts it) so a view copied from a
     // read can be pasted in unchanged.
     publicViewVersion: z.number().optional(),
@@ -752,6 +859,170 @@ function publicViewSchemaIssues(schema: {
   return out;
 }
 
+// The values of one dataScope dimension. The platform refuses an empty list: it states no rule, and a dimension a clause does
+// not bound is left out instead.
+const DataScopeValuesSchema = z
+  .array(z.union([safeDisplayString(z.string().min(1)), z.null()]))
+  .min(1, { message: 'a dataScope dimension lists at least one value; leave out a dimension the clause does not bound' });
+
+// The platform's identifier grammar for a type name, a field id, a lookup's field names and a reference's target. The names
+// become part of stored keys, so the platform refuses any other name when the schema is written.
+const SCHEMA_IDENTIFIER = /^[A-Za-z0-9_-]{1,64}$/;
+// A name carrying a forgery character is already refused by its own field rule; it is not reported a second time here.
+const notIdentifier = (name: string): boolean => !FORGERY_CHARS_RE.test(name) && !SCHEMA_IDENTIFIER.test(name);
+const IDENTITY_SURFACES = new Set(['user', 'entity']);
+
+/**
+ * The schema rules the platform applies at schema write that depend only on what the schema itself declares. Each issue is
+ * [path, message]; the caller prefixes the schema's name.
+ */
+function schemaDeclarationIssues(schema: {
+  typeName: string;
+  fields: ReadonlyArray<{
+    fieldId: string;
+    fieldType: string;
+    itemType?: string;
+    sensitive?: boolean;
+    searchable?: boolean;
+    targetTypeName?: string;
+    targetField?: string;
+  }>;
+  lookupFields?: ReadonlyArray<string | { fieldName?: string; fieldNames?: string[]; sortBy?: string; rangeEnabled?: boolean }>;
+  allowedSurfaces?: readonly string[];
+  basedOn?: string;
+  userId?: string;
+  scopes?: readonly string[];
+  writePolicy?: BlueprintWritePolicy | null;
+  storageProfile?: string;
+  publicView?: { mode?: string } | null;
+}): Array<[Array<string | number>, string]> {
+  const out: Array<[Array<string | number>, string]> = [];
+  const badName = (label: string, name: string): string =>
+    `${label} '${name}' must be 1 to 64 letters, digits, underscores or hyphens`;
+  if (notIdentifier(schema.typeName)) out.push([['typeName'], badName('typeName', schema.typeName)]);
+  const surfaces = schema.allowedSurfaces ?? ['record'];
+  if (surfaces.some((s) => IDENTITY_SURFACES.has(s)) && surfaces.some((s) => !IDENTITY_SURFACES.has(s))) {
+    out.push([['allowedSurfaces'], "allowedSurfaces cannot mix 'user' or 'entity' with 'record' or 'document'"]);
+  }
+  const byId = new Map(schema.fields.map((f) => [f.fieldId, f]));
+  schema.fields.forEach((f, i) => {
+    if (notIdentifier(f.fieldId)) out.push([['fields', i, 'fieldId'], badName('fieldId', f.fieldId)]);
+    const special = f.fieldType === 'geo' || f.fieldType === 'asset' || f.fieldType === 'assets';
+    if (f.itemType !== undefined && f.fieldType !== 'array') out.push([['fields', i, 'itemType'], `field '${f.fieldId}': itemType applies only to an array field`]);
+    if (!special && f.sensitive === true && f.searchable === true) {
+      out.push([['fields', i], `field '${f.fieldId}' cannot be both sensitive and searchable`]);
+    }
+    if (f.fieldType === 'reference') {
+      if (f.searchable === true) out.push([['fields', i, 'searchable'], `reference field '${f.fieldId}' cannot be searchable`]);
+      if (f.targetTypeName !== undefined && notIdentifier(f.targetTypeName)) {
+        out.push([['fields', i, 'targetTypeName'], badName('targetTypeName', f.targetTypeName)]);
+      }
+      if (f.targetField !== undefined && notIdentifier(f.targetField)) {
+        out.push([['fields', i, 'targetField'], badName('targetField', f.targetField)]);
+      }
+    }
+  });
+  const seenLookups = new Set<string>();
+  (schema.lookupFields ?? []).forEach((lf, i) => {
+    const legs = typeof lf === 'string' ? [lf] : lf.fieldNames ?? (lf.fieldName !== undefined ? [lf.fieldName] : []);
+    for (const leg of legs) if (notIdentifier(leg)) out.push([['lookupFields', i], badName('lookupField', leg)]);
+    const identity = legs.join(',');
+    if (identity !== '' && seenLookups.has(identity)) out.push([['lookupFields', i], `lookupField '${identity}' is declared more than once`]);
+    seenLookups.add(identity);
+    if (typeof lf === 'string') return;
+    const sortBy = lf.sortBy;
+    if (sortBy !== undefined && sortBy !== 'createdAt' && sortBy !== 'lastUpdated') {
+      const target = byId.get(sortBy);
+      if (target?.sensitive === true) {
+        out.push([['lookupFields', i, 'sortBy'], `sortBy cannot be '${sortBy}': it is a sensitive field`]);
+      } else if (target?.fieldType === 'array' || target?.fieldType === 'object') {
+        out.push([['lookupFields', i, 'sortBy'], `sortBy cannot be '${sortBy}': an ${target.fieldType} field has no order to sort by`]);
+      }
+    }
+    if (lf.rangeEnabled === true && legs.length === 1 && byId.get(legs[0])?.sensitive === true) {
+      out.push([['lookupFields', i, 'rangeEnabled'], `lookupField '${legs[0]}' cannot be rangeEnabled: it is a sensitive field`]);
+    }
+  });
+  if (schema.storageProfile === 'LARGE_PAYLOAD' && schema.publicView && schema.publicView.mode === 'record') {
+    out.push([['storageProfile'], "publicView mode 'record' cannot be combined with storageProfile LARGE_PAYLOAD: a record-mode type is served inline; use mode 'projection'"]);
+  }
+  const owned = schema.userId !== undefined || (schema.scopes !== undefined && schema.scopes.length > 0);
+  if (schema.basedOn !== undefined && !owned) {
+    out.push([['basedOn'], 'a customization (basedOn) must declare an owner: userId or scopes']);
+  }
+  if (schema.writePolicy && owned && (['create', 'update', 'delete'] as const).some((op) => schema.writePolicy?.[op] !== undefined)) {
+    out.push([['writePolicy'], 'writePolicy can be declared only on a schema with no userId and no scopes']);
+  }
+  if (schema.writePolicy) {
+    for (const op of ['create', 'update', 'delete'] as const) {
+      const seen = new Set<string>();
+      (schema.writePolicy[op]?.via ?? []).forEach((v, vi) => {
+        const key = `${v.script}\u0000${v.sha256 ?? ''}`;
+        if (seen.has(key)) out.push([['writePolicy', op, 'via', vi], `writePolicy.${op} admits script '${v.script}' twice with the same seal`]);
+        seen.add(key);
+      });
+    }
+  }
+  return out;
+}
+
+// The field names the search engine keeps for itself. On a type that offers public search, no filterable field and no
+// publishWhen field may carry one (compared without regard to case), nor a name starting with '_geo_'.
+export const PUBLIC_SEARCH_RESERVED_NAMES = [
+  'tenant_id', 'tenantid', 'owner_id', 'ownerid', 'scope', 'organization_id', 'client_id', 'context_id', 'contextid', 'model_type',
+  'sourcetype', 'recordtype', 'document_id', 'chunk_index', 'text', 'timestamp', 'index_generation', 'folderid', 'rootfolderid',
+  'publiccopy', 'public_copy_owner',
+] as const;
+const PUBLIC_SEARCH_RESERVED_SET: ReadonlySet<string> = new Set(PUBLIC_SEARCH_RESERVED_NAMES);
+const isSearchReserved = (name: string): boolean => PUBLIC_SEARCH_RESERVED_SET.has(name.toLowerCase()) || name.startsWith('_geo_');
+
+/**
+ * `publicView.search`: what the platform needs before it offers a public search on the type. Record mode: the schema's indexMode
+ * covers each offered mode (text needs TEXT or HYBRID; semantic and hybrid need SEMANTIC or HYBRID) and at least one field is
+ * searchable and not sensitive. Projection mode: at least one listed field is a string. Both: no filterable field, and in record mode
+ * no publishWhen field, carries a name the search engine keeps for itself.
+ */
+function publicSearchIssues(schema: {
+  indexMode?: string;
+  fields: ReadonlyArray<{ fieldId: string; fieldType: string; sensitive?: boolean; searchable?: boolean; filterable?: boolean }>;
+  publicView?: { mode?: string; fields?: readonly string[]; search?: readonly string[]; publishWhen?: { field: string } } | null;
+}): Array<[Array<string | number>, string]> {
+  const out: Array<[Array<string | number>, string]> = [];
+  const pv = schema.publicView;
+  if (!pv || !pv.search || pv.search.length === 0) return out;
+  if ((pv.mode ?? 'projection') === 'projection') {
+    const listed = new Set(pv.fields ?? []);
+    if (!schema.fields.some((f) => listed.has(f.fieldId) && f.fieldType === 'string')) {
+      out.push([['publicView', 'search'], 'publicView.search needs at least one listed field of type string']);
+    }
+  } else if (schema.indexMode !== undefined) {
+    // Checked only when the blueprint declares the mode: left out, a re-apply keeps the stored one, which is not known here.
+    const indexMode = schema.indexMode;
+    const text = indexMode === 'TEXT' || indexMode === 'HYBRID';
+    const vector = indexMode === 'SEMANTIC' || indexMode === 'HYBRID';
+    for (const m of pv.search) {
+      if (m === 'text' ? !text : !vector) {
+        out.push([['publicView', 'search'], `publicView.search offers '${m}', but indexMode is ${indexMode}: text search needs TEXT or HYBRID, semantic and hybrid search need SEMANTIC or HYBRID`]);
+      }
+    }
+  }
+  if ((pv.mode ?? 'projection') !== 'projection') {
+    // The declared fields are sent whole, so this does not depend on what is stored.
+    if (!schema.fields.some((f) => f.searchable === true && f.sensitive !== true)) {
+      out.push([['publicView', 'search'], 'publicView.search needs at least one searchable field that is not sensitive']);
+    }
+    if (pv.publishWhen && isSearchReserved(pv.publishWhen.field)) {
+      out.push([['publicView', 'publishWhen', 'field'], `a type that offers public search cannot publish by '${pv.publishWhen.field}': the search engine keeps that name`]);
+    }
+  }
+  schema.fields.forEach((f, i) => {
+    if (f.filterable === true && isSearchReserved(f.fieldId)) {
+      out.push([['fields', i, 'fieldId'], `a type that offers public search cannot have a filterable field named '${f.fieldId}': the search engine keeps that name`]);
+    }
+  });
+  return out;
+}
+
 const BlueprintSchemaSchema = z
   .object({
     // safeDisplayString: buildPlan's schema step renders this raw into a single summary
@@ -777,6 +1048,10 @@ const BlueprintSchemaSchema = z
     // and a document with no indexMode is rejected outright. Declare the mode you
     // want; do not rely on the absent case to mean "searchable".
     indexMode: z.enum(['HYBRID', 'SEMANTIC', 'TEXT', 'NONE']).optional(),
+    // Where a record's payload is stored: STANDARD (the default: large payloads stored out of line, small ones inline),
+    // LOW_LATENCY (always inline) or LARGE_PAYLOAD (always out of line, which lifts the 400 KB item limit). Sent only when
+    // declared; a later apply that leaves it out keeps the stored value.
+    storageProfile: z.enum(['STANDARD', 'LOW_LATENCY', 'LARGE_PAYLOAD']).optional(),
     fields: z.array(BlueprintFieldDefSchema).default([]),
     lookupFields: z.array(BlueprintLookupFieldSchema).max(10).optional(),
     // Which typed surfaces may bind this schema. REQUIRED + non-empty on
@@ -828,6 +1103,11 @@ const BlueprintSchemaSchema = z
     // re-apply leaves a stored public view unchanged; `null` removes it.
     // `.nullable()`, not a union with null: a union reports a refused view as a bare 'Invalid input', hiding the reason.
     publicView: BlueprintPublicViewSchema.nullable().optional(),
+    // A write fence (see BlueprintWritePolicySchema). Declared on a base schema whose allowedSurfaces is exactly ['record'].
+    // Omitting it on a re-apply leaves a stored fence unchanged; `null` lifts it. Widening a fence (lifting it, admitting
+    // another script, path or trigger, or changing a script's code) needs the `write-policy-declare` capability, which the
+    // context token `vectros blueprint apply` runs under carries. A newly added fence reaches every server within about 30 seconds (rarely up to a minute).
+    writePolicy: BlueprintWritePolicySchema.nullable().optional(),
     // Makes this a public-media document type: a document type for images (the
     // platform's schema `fileProfile`). It needs `allowedSurfaces: ['document']`; the type is never indexed. Once set, a
     // later apply that leaves it out keeps it. `mediaKinds` (only `image`), `maxBytes` (at most 10 MiB) and
@@ -840,6 +1120,9 @@ const BlueprintSchemaSchema = z
   })
   .strict()
   .superRefine((schema, ctx) => {
+    [...schemaDeclarationIssues(schema), ...publicSearchIssues(schema)].forEach(([path, message]) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `schema '${schema.typeName}': ${message}` }),
+    );
     // The geo rules that need the whole schema, as the platform checks them: no lookup on a geo field, no sortBy naming one, and
     // record or document schemas only.
     const geoIds = new Set(schema.fields.filter((f) => f.fieldType === 'geo').map((f) => f.fieldId));
@@ -900,6 +1183,17 @@ const BlueprintSchemaSchema = z
     publicMediaSchemaIssues(schema).forEach(([path, message]) =>
       ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `schema '${schema.typeName}': ${message}` }),
     );
+    if (schema.writePolicy) {
+      const surfaces = schema.allowedSurfaces ?? ['record'];
+      if (schema.basedOn !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['writePolicy'],
+          message: `schema '${schema.typeName}': writePolicy is declared on a base schema only; it governs every customization (basedOn) of the type` });
+      }
+      if (surfaces.length !== 1 || surfaces[0] !== 'record') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['writePolicy'],
+          message: `schema '${schema.typeName}': writePolicy requires allowedSurfaces to be exactly ['record']` });
+      }
+    }
     if (schema.publicView) {
       publicViewSchemaIssues(schema).forEach(([path, message]) =>
         ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: `schema '${schema.typeName}': ${message}` }),
@@ -928,6 +1222,14 @@ const BlueprintSchemaSchema = z
           path: ['publicView', 'publishWhen', 'field'],
           message: `schema '${schema.typeName}': publicView.publishWhen.field '${pw.field}' is not a declared field`,
         });
+      } else if (pw) {
+        publishWhenIssues(schema, pw).forEach(([path, message]) =>
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['publicView', 'publishWhen', ...path],
+            message: `schema '${schema.typeName}': ${message}`,
+          }),
+        );
       }
     }
     // A composite ('fieldNames') lookup is record-only — the platform's composite
@@ -1124,7 +1426,7 @@ const BlueprintAccessProfileSchema = z
     // this file, and so a future preview enhancement that starts showing these values (a very
     // plausible one, given the existing renderPlanDataScope precedent) doesn't silently reopen
     // this exact class on a field that looks, byte-for-byte, like every other one already closed.
-    dataScope: z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
+    dataScope: z.record(z.string(), DataScopeValuesSchema).optional(),
     // Optional identity overrides for the service principal's profile — scope
     // values its key STAMPS onto everything it writes (a credential can only
     // stamp ownership its identity carries). Keys are the namespaced `scope:<ns>`
@@ -1251,7 +1553,7 @@ const BlueprintAccessProfileSchema = z
 const BlueprintRoleClauseSchema = z
   .object({
     allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1),
-    dataScope: z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
+    dataScope: z.record(z.string(), DataScopeValuesSchema).optional(),
     dataScopeRef: z.string().min(1).optional(),
     capabilities: GrantedCapabilitiesSchema,
     assignableRoles: AssignableRolesSchema,
@@ -1396,7 +1698,7 @@ const BlueprintTriggerEntrySchema = z
     scriptRef: BlueprintTriggerScriptRefSchema,
     allowedActions: z.array(safeDisplayString(z.string().min(1))).min(1).optional(),
     roleIds: z.array(z.string().min(1)).min(1).optional(),
-    dataScope: z.record(z.string(), z.array(z.union([safeDisplayString(z.string().min(1)), z.null()]))).optional(),
+    dataScope: z.record(z.string(), DataScopeValuesSchema).optional(),
     capabilities: GrantedCapabilitiesSchema,
     manifest: BlueprintTriggerManifestSchema,
     /**
@@ -1506,6 +1808,9 @@ const SCRIPT_INPUT_CONTRACT_MAX_BYTES = 50_000;
 
 const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
 
+/** The platform's destination alias rule: a lowercase letter, then 1 to 39 lowercase letters, digits or `-`. */
+export const DESTINATION_ALIAS_FORMAT = /^[a-z][a-z0-9-]{1,39}$/;
+
 const BlueprintScriptEntrySchema = z
   .object({
     /**
@@ -1557,9 +1862,36 @@ const BlueprintScriptEntrySchema = z
     /**
      * The operation names this script version declares. Part of the version: changing the list pushes a new version. The
      * platform decides which names a version may declare, and declaring one needs the capability mapped to it; this package
-     * checks only that each entry is a string. Needs platform 0.50.0 or later.
+     * checks that each entry is a non-empty string (no name is ever empty) and that the list, counted as sent (repeats
+     * count), is not longer than the platform accepts. A repeated entry is otherwise allowed: the platform stores the list
+     * distinct and sorted. Needs platform 0.50.0 or later.
      */
-    optInOperations: z.array(z.string()).optional(),
+    optInOperations: z
+      .array(z.string().min(1, { message: 'an operation name cannot be empty' }))
+      // Mirrors the platform's current limit; if the platform raises it, raise this to match.
+      .max(16, { message: 'an operation list has more entries than a version may declare' })
+      .optional(),
+    /**
+     * The destinations (by alias) this script may call. A declaration that apply CHECKS, never a grant: an account owner
+     * approves each script version for each destination (`vectros scripts approve`, or the developer portal), and apply
+     * reports every declared destination the version it converged on is not approved for, with the command that
+     * approves it. Each alias follows the platform's destination alias rule; a repeated alias is refused. Not part of the
+     * script version: changing the list pushes nothing.
+     */
+    destinations: z
+      .array(
+        z.string().regex(DESTINATION_ALIAS_FORMAT, {
+          message: 'a destination alias is a lowercase letter, then 1 to 39 lowercase letters, digits or -',
+        }),
+      )
+      .superRefine((list, ctx) => {
+        const seen = new Set<string>();
+        list.forEach((alias, i) => {
+          if (seen.has(alias)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i], message: `destination '${alias}' is listed twice` });
+          seen.add(alias);
+        });
+      })
+      .optional(),
   })
   .strict();
 
@@ -3378,6 +3710,53 @@ function lintTriggerFields(value: unknown, ctx: z.RefinementCtx): void {
  * A `scriptRef` naming a script this blueprint does NOT ship stays entirely unrestricted, pin and
  * all — that is the "reference a script someone else pushed" case.
  */
+/**
+ * A writePolicy `via` entry with no `sha256` must name a script THIS blueprint ships (its seal is computed from the declared
+ * source); with a `sha256` it may name any script. Every `triggers` entry must name a trigger THIS blueprint declares, and that
+ * trigger must run the same script. A trigger admission for a script the blueprint does not ship cannot be resolved.
+ */
+function lintWritePolicies(value: unknown, ctx: z.RefinementCtx): void {
+  const bp = value as {
+    schemas?: Array<{ typeName: string; writePolicy?: BlueprintWritePolicy | null }>;
+    scripts?: Record<string, unknown>;
+    triggers?: Record<string, { scriptRef?: { name?: string } }>;
+  };
+  const shipped = (name: string): boolean => !!bp.scripts && Object.prototype.hasOwnProperty.call(bp.scripts, name);
+  // A seed is an ordinary record create, applied AFTER the fence is written, so seeding a type whose create is fenced
+  // fails the apply part-way (root included: the fence binds every API caller). Refuse it before anything is sent.
+  const createFenced = new Set((bp.schemas ?? []).filter((s) => s.writePolicy?.create !== undefined).map((s) => s.typeName));
+  ((bp as { seed?: Array<{ typeName?: string; surface?: string }> }).seed ?? []).forEach((seed, i) => {
+    if ((seed.surface ?? 'record') === 'record' && seed.typeName !== undefined && createFenced.has(seed.typeName)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['seed', i, 'typeName'],
+        message: `seed ${i} creates a '${seed.typeName}' record, but that type's writePolicy fences create: a seed is a direct write the ` +
+          'fence refuses. Seed it through an admitted script, or remove the create fence.' });
+    }
+  });
+  (bp.schemas ?? []).forEach((schema, si) => {
+    const wp = schema.writePolicy;
+    if (!wp) return;
+    for (const op of ['create', 'update', 'delete'] as const) {
+      (wp[op]?.via ?? []).forEach((v, vi) => {
+        const path = ['schemas', si, 'writePolicy', op, 'via', vi];
+        if (v.sha256 === undefined && !shipped(v.script)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, 'script'],
+            message: `schema '${schema.typeName}' writePolicy.${op} admits script '${v.script}', which this blueprint does not ship: add it to scripts, or give its sha256 seal` });
+        }
+        (v.triggers ?? []).forEach((t, ti) => {
+          const trig = bp.triggers?.[t];
+          if (!trig) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, 'triggers', ti],
+              message: `schema '${schema.typeName}' writePolicy.${op} admits trigger '${t}', which this blueprint does not declare` });
+          } else if (trig.scriptRef?.name !== v.script) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, 'triggers', ti],
+              message: `schema '${schema.typeName}' writePolicy.${op} admits trigger '${t}' for script '${v.script}', but that trigger runs '${trig.scriptRef?.name}'` });
+          }
+        });
+      });
+    }
+  });
+}
+
 function lintScripts(value: unknown, ctx: z.RefinementCtx): void {
   const bp = value as {
     scripts?: Record<string, unknown>;
@@ -3881,12 +4260,36 @@ export const BlueprintSchema = z
      * platform-sent correspondence (e.g. invite emails) alongside `contextName` — not a
      * replacement for it. See {@link companyNameOf}.
      *
-     * `safeDisplayString`: not interpolated into any CLI plan-preview line today (confirmed —
-     * `loader.ts` never reads `companyName`), but it IS forwarded to the platform for the
+     * `safeDisplayString`: not interpolated into any CLI plan-preview line today, but the loader
+     * sends it to the platform when it creates the app context and on every re-apply, for the
      * invite-email correspondence described above, a second class of human-read surface this
      * value reaches. Wrapped for the same reason as every sibling scalar identity field here.
+     * At most 100 characters, the platform's limit.
      */
-    companyName: safeDisplayString(z.string().min(1)).optional(),
+    companyName: safeDisplayString(z.string()).optional(),
+    /**
+     * Settings of the app context itself. On a create every declared setting is sent. On a re-apply the ordinary ones
+     * (description, readAccessLogDefault, meteringAxis, principalBurstLimit, principalUsageCap) are reconciled to the declared
+     * values, and a key left out keeps the stored value. allowSelfErasure and selfErasureGraceDays are applied on a create
+     * only: changing them on an existing context needs the account owner's own credential, so a re-apply reports a declared
+     * value that differs from the live one instead of changing it.
+     */
+    appContext: z
+      .object({
+        description: z.string().max(500).optional(),
+        readAccessLogDefault: z.boolean().optional(),
+        // 'user', or 'scope:<namespace>'
+        meteringAxis: z
+          .string()
+          .regex(/^(user|scope:[a-z][a-z0-9_-]{1,31})$/, { message: "meteringAxis is 'user' or 'scope:<namespace>'" })
+          .optional(),
+        principalBurstLimit: z.number().int().min(1).max(2147483647).optional(),
+        principalUsageCap: z.number().int().min(1).max(2147483647).optional(),
+        allowSelfErasure: z.boolean().optional(),
+        selfErasureGraceDays: z.number().int().min(0).max(30).optional(),
+      })
+      .strict()
+      .optional(),
     schemas: z.array(BlueprintSchemaSchema).default([]),
     accessProfile: BlueprintAccessProfileSchema,
     servicePrincipal: BlueprintServicePrincipalSchema,
@@ -4033,7 +4436,55 @@ export const BlueprintSchema = z
     lintTriggerFields(bp, ctx);
     lintScripts(bp, ctx);
     lintAgents(bp, ctx);
+    lintWritePolicies(bp, ctx);
+    lintPlatformRules(bp, ctx);
   });
+
+/**
+ * The platform rules, outside the schemas, that depend only on the blueprint's text: the app context it creates, the names it
+ * stamps on what it manages, and its issuers.
+ */
+function lintPlatformRules(
+  bp: {
+    name: string;
+    contextId: string;
+    contextName?: string;
+    companyName?: string;
+    triggers?: Record<string, unknown>;
+    scripts?: Record<string, unknown>;
+    agents?: Record<string, unknown>;
+    issuers?: Array<{ issuerId?: string; selfSignupPolicies?: Array<{ signupType: string }> }>;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const issue = (path: Array<string | number>, message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  if (bp.contextId === 'vectros-admin') issue(['contextId'], "contextId 'vectros-admin' is reserved");
+  const contextName = bp.contextName ?? `MCP — ${bp.name}`;
+  if (contextName.length > 100) {
+    issue([bp.contextName === undefined ? 'name' : 'contextName'], 'the app context name is at most 100 characters (contextName, or the name it defaults from)');
+  }
+  if (bp.companyName !== undefined && bp.companyName.length > 100) issue(['companyName'], 'companyName is at most 100 characters');
+  // The platform records the blueprint's name on every trigger, script and agent it manages, and refuses a name outside its
+  // identifier grammar there.
+  const managesAny = [bp.triggers, bp.scripts, bp.agents].some((m) => m !== undefined && Object.keys(m).length > 0);
+  if (managesAny && !FORGERY_CHARS_RE.test(bp.name) && !SCHEMA_IDENTIFIER.test(bp.name)) {
+    issue(['name'], 'a blueprint that declares triggers, scripts or agents needs a name of 1 to 64 letters, digits, underscores or hyphens');
+  }
+  for (const t of Object.keys(bp.triggers ?? {})) {
+    if (!FORGERY_CHARS_RE.test(t) && !SCHEMA_IDENTIFIER.test(t)) issue(['triggers', t], `trigger name '${t}' must be 1 to 64 letters, digits, underscores or hyphens`);
+  }
+  const issuers = bp.issuers ?? [];
+  if (issuers.length > 1) issue(['issuers'], 'an app context has at most one issuer, so a blueprint declares at most one');
+  issuers.forEach((iss, i) => {
+    const policies = iss.selfSignupPolicies ?? [];
+    if (policies.length > 20) issue(['issuers', i, 'selfSignupPolicies'], 'selfSignupPolicies lists at most 20 entries');
+    const seen = new Set<string>();
+    policies.forEach((p, j) => {
+      if (seen.has(p.signupType)) issue(['issuers', i, 'selfSignupPolicies', j, 'signupType'], `signupType '${p.signupType}' is listed more than once`);
+      seen.add(p.signupType);
+    });
+  });
+}
 
 export type Blueprint = z.infer<typeof BlueprintSchema>;
 export type BlueprintFieldDef = z.infer<typeof BlueprintFieldDefSchema>;

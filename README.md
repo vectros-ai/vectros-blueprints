@@ -196,8 +196,8 @@ A schema additionally accepts:
   - **equality (default) vs. `rangeEnabled`** — equality for ids/foreign keys/
     status enums/categories; `rangeEnabled` (ordered `from`/`to`/`prefix`, billed
     at the range rate) for values you query as an order (**dates, sequences,
-    scores, versions**). Order follows the declared `fieldType`: `number` and `date`
-    fields order numerically and chronologically, while a string-typed field orders
+    scores, versions**). Order follows the declared `fieldType`: `number` fields order
+    numerically, `date` and `instant` fields chronologically, while a string-typed field orders
     lexically (`1.10` before `1.9`) and an ordinal enum (`low…urgent`) alphabetically —
     leave those as equality. Single-field lookups only — a composite is an exact-match
     index over its fields; declare the range lookup separately.
@@ -244,6 +244,14 @@ A schema additionally accepts:
   platform when omitted; surface it to make the audit posture self-documenting. `triggersEnabled`
   defaults to `false` and is the opt-in a schema must declare before a trigger may fire on its
   records — the two are independent, so turning audit history off does not turn triggers off.
+  It also takes `ttlEligible` (records may carry `expiresAt`), `strict` (a
+  payload key the schema does not declare is refused), `validateReferences` (default on) and
+  `readAccessLog`. A declared block is laid over the live capabilities: one the block leaves out
+  keeps its live value, and `false` turns one off.
+- **`storageProfile`** — `STANDARD`, `LOW_LATENCY` or `LARGE_PAYLOAD`. Left out,
+  the stored value is kept. Not `LARGE_PAYLOAD` with a public view in mode `record`.
+- **`itemType`** — on an `array` field only: the element type (`string`,
+  `number`, `boolean`, `date` or `instant`). Needs platform 0.51.0 or later.
 - **`filterable` field ids are checked against the platform's own search-index keys.** A
   `filterable: true` field whose `fieldId` collides with a platform-owned metadata key for a surface
   the schema binds to would shadow the platform's value in the index, and the platform rejects it —
@@ -269,8 +277,7 @@ A schema additionally accepts:
   blueprint never needs this — it reconciles server-side by owner — this field
   is for a schema that intentionally customizes a base another owner defined.
 - **`fileProfile: PUBLIC_MEDIA`** (with optional `mediaKinds`, `maxBytes`,
-  `contentTypes`) — makes a document schema a public-media type, for images (nothing is
-  served publicly in this release). It needs
+  `contentTypes`) — makes a document schema a public-media type, for images. It needs
   `allowedSurfaces: ['document']`, is never indexed, and cannot use `basedOn`;
   `mediaKinds` is `['image']`, `maxBytes` at most 10485760 (10 MiB), and
   `contentTypes` a subset of `image/jpeg`, `image/png`, `image/webp`,
@@ -280,29 +287,34 @@ A schema additionally accepts:
 - **`documentTypes`** on a field of type `asset` (one image) or `assets` (up to
   20) — the public-media document types the field accepts. Required on both and
   allowed only on them; an asset field cannot be sensitive, searchable, an enum
-  or a reference, and is declared only on a base schema. The platform also
-  requires a new asset field to be served by the schema's `publicView`. An
-  image cannot be attached in this version (`400` `ASSET_NOT_ATTACHABLE`).
-  Needs platform 0.50.0 or later.
+  or a reference, and is declared only on a base schema. On
+  platform 0.51.0 or later it may be declared on any base schema; its images
+  are public only while the record is public under a `publicView` that serves
+  the field. Needs platform 0.50.0 or later.
 - **`geocode`** on a field of type `geo` — `{ from: [...] }` names the fields
   of the same schema that hold its address (at most 10, distinct, each `string`,
   `enum` or `number`, never `sensitive`). The platform looks up the field's
   location after each write that changes the address; a record carries its
   progress in `geocodeStatus`. Record schemas only (refused offline on a schema
   whose `allowedSurfaces` include `document`). Needs platform 0.50.0 or later.
+- **`appContext`** (top level) — the app context's own settings:
+  `description`, `readAccessLogDefault`, `meteringAxis`, `principalBurstLimit`,
+  `principalUsageCap`, `allowSelfErasure`, `selfErasureGraceDays`. A create sends each one
+  declared; a re-apply updates the first five and reports, without changing, a different
+  `allowSelfErasure` or `selfErasureGraceDays` (those need the account owner's own credential).
 - **`publicView`** — makes the type's records readable without signing in,
   mirroring the platform's schema `publicView`: `mode` (`projection`, the
   default, copies only the listed `fields`; `record` makes every declared field
   public), `ownedBy` (`userId` and/or up to two `scope:<namespace>` entries),
   and optionally `publishWhen` (`{ field, in }`: only records whose field holds
-  one of the values are public) and `search`. Declared on a base schema only,
+  one of the values are public) and `search`. The `publishWhen`
+  field must be a filterable `string`, `enum`, `number` or `boolean` field that is
+  not sensitive and is a lookup field of its own, and each value must have its
+  type (for an `enum`, be one of its `enumValues`); `validate` checks this offline. Declared on a base schema only,
   with `allowedSurfaces` omitted or `['record']`; a field that is sensitive or a
   reference can never be public. `null` removes the view; leaving the key out
   keeps the stored one. Publishing needs the account's public access, switched
-  on by the account owner with the developer portal API. Where public serving is
-  not open, a read answers `503` `PUBLIC_ACCESS_NOT_LAUNCHED` for an account whose
-  public access is otherwise ready; an account that is not ready gets the `503`
-  code for what is missing first.
+  on by the account owner with the developer portal API.
   Needs platform 0.50.0 or later.
 
   A `projection` view may list a `geo` field and must then say how precisely
@@ -311,6 +323,16 @@ A schema additionally accepts:
   centre the public copy holds (the record itself keeps the exact location).
   Changing a published precision, in either direction, counts as making more
   data public. Needs platform 0.50.0 or later.
+
+  `publicView.cacheSeconds` (a whole number of seconds, 0 to 86400; 0, or
+  omitted on a first declaration, never caches) lets the edge serve the type's public answers from its
+  cache for that long; taking a record down purges the cached answers that held
+  it. `purgeListsOnChange: true` also purges the cached answers that held a record when it changes while it stays
+  public, within the public budget and an hourly cap. A record that newly becomes public shows in a cached list or
+  search when its cached copy expires. A view declared without one of them keeps the live value on a
+  re-apply (`vectros blueprint apply` reads it first), so caching set elsewhere
+  is not reset. Changing either needs the `public-publish` capability. Needs
+  platform 0.51.0 or later (an earlier platform refuses both keys).
 
 ### Access: `accessProfile`, `roles` and related elements
 
@@ -465,9 +487,14 @@ triggers:
   the platform's small JSON Schema dialect (a root `{ type: object }`; `type`, `description`, `enum`;
   `properties`, `required`, `additionalProperties` on objects; `items` on arrays; at most 5 levels and
   16,384 bytes). `validate` checks it with the platform's rules. Needs platform 0.50.0 or later.
-- `optInOperations` — optional: the operation names this version declares. The platform decides which
-  names a version may declare; this package checks only that each entry is a string.
-  Needs platform 0.50.0 or later.
+- `optInOperations` — optional: the operation names this version declares. The platform decides which names a version may
+  declare. This package checks that each entry is a non-empty string and that the list is not longer than the platform
+  accepts; the platform's own check is the authority. Needs platform 0.50.0 or later.
+- `destinations` — optional (needs platform 0.51.0 or later): the destinations (by alias) this script may call: a lowercase letter, then 1 to 39
+  lowercase letters, digits or `-`, each listed once. Not part of the version. It is checked, never granted:
+  an account owner approves each script version for each destination (`vectros scripts approve`, or the
+  developer portal), and `vectros blueprint apply` reports every declared destination the applied version
+  is not approved for, with the exact command that approves it.
 
 Both limits are counted in **UTF-8 bytes, not characters**, matching the platform — a source full of
 multi-byte characters can sit under 300,000 characters and still be over the limit.
@@ -634,6 +661,7 @@ A blueprint may also declare top-level **`issuers`** — trusted third-party IdP
 issuers to register for BYO-IdP token exchange, each `{ issuerId, issuer, jwksUri,
 audience, contextId, subClaim?, emailClaim?, userinfoUri?, restrictedToDomain?, selfSignupPolicies?, capturedClaims?, acceptedIdTokenClientIds? }`.
 A re-apply replaces the issuer's whole `selfSignupPolicies` list with the one the blueprint declares, including each entry's `additionalRoleIds`: declare every additional role in the blueprint, or the next apply removes it.
+Deleting an app context retires the issuerId of an issuer whose users signed in through it. A later apply that registers it with a different issuer, jwksUri, audience or subClaim stops at the issuer step. The app context stays.
 `issuer`, `jwksUri` and, when set, `userinfoUri` must be `https://` URLs in printable ASCII whose
 host is only letters, digits, dots and dashes with an optional port: no userinfo (`@`), percent-encoding,
 bracketed IPv6 literal or non-ASCII host (write an internationalized domain in its punycode `xn--` form).
@@ -912,7 +940,8 @@ data-plane-only. The bundled `task-management` blueprint is the
 heavily-commented exemplar — copy it to start.
 
 **`fieldType` must be a platform-supported type** — one of `string`, `number`,
-`boolean`, `date`, `enum`, `array`, `object`, `reference`.
+`boolean`, `date`, `instant`, `enum`, `array`, `object`, `reference`, `geo`, `asset`,
+`assets`.
 The format keeps `fieldType` a free-form string for forward-compat, so an unsupported
 value (e.g. `string[]` — a string array is **`array`**) parses fine but **400s at
 `createSchema`** on a live apply. The bundled-library tests include a `fieldType`

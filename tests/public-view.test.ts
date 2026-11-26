@@ -18,7 +18,7 @@ function withSchema(schema: Record<string, unknown>): unknown {
         displayName: 'Listing',
         fields: [
           { fieldId: 'title', fieldType: 'string' },
-          { fieldId: 'state', fieldType: 'string' },
+          { fieldId: 'state', fieldType: 'string', filterable: true },
         ],
         lookupFields: ['state'],
         ...schema,
@@ -49,7 +49,7 @@ test('publicView: projection mode with fields, publishWhen and search parses', (
     mode: 'projection',
     fields: ['title'],
     ownedBy: ['userId', 'scope:org'],
-    publishWhen: { field: 'state', in: ['open', 1, true] },
+    publishWhen: { field: 'state', in: ['open', 'featured'] },
     search: ['text'],
   };
   assert.deepEqual(parseBlueprint(withSchema({ publicView: pv })).schemas[0].publicView, pv);
@@ -72,8 +72,18 @@ test('publicView: record mode refuses fields', () => {
   );
 });
 
+test('publicView.cacheSeconds and purgeListsOnChange: 0 to 86400 seconds, and a boolean, in either mode', () => {
+  const view = (extra: Record<string, unknown>) => withSchema({ publicView: { mode: 'record', ownedBy: ['scope:org'], ...extra } });
+  assert.equal(parseBlueprint(view({ cacheSeconds: 60, purgeListsOnChange: true })).schemas[0].publicView?.cacheSeconds, 60);
+  assert.deepEqual(issues(view({ cacheSeconds: 0 })), []);
+  assert.deepEqual(issues(view({ cacheSeconds: 86_400 })), []);
+  for (const bad of [-1, 86_401, 1.5, '60']) assert.ok(issues(view({ cacheSeconds: bad })).length > 0, String(bad));
+  assert.ok(issues(view({ purgeListsOnChange: 'yes' })).length > 0);
+  assert.deepEqual(issues(withSchema({ publicView: { fields: ['title'], ownedBy: ['userId'], cacheSeconds: 300 } })), []);
+});
+
 test('publicView: an unknown key is refused, as the platform refuses it', () => {
-  assert.ok(issues(withSchema({ publicView: { mode: 'record', ownedBy: ['scope:org'], cacheSeconds: 60 } })).length > 0);
+  assert.ok(issues(withSchema({ publicView: { mode: 'record', ownedBy: ['scope:org'], listBy: ['title'] } })).length > 0);
   assert.ok(
     issues(withSchema({ publicView: { mode: 'record', ownedBy: ['scope:org'], publishWhen: { field: 'state', in: ['open'], not: [] } } }))
       .length > 0,
@@ -147,15 +157,20 @@ test('publicView: publicViewVersion (server-managed) is accepted, so a view copi
 
 test('publicView offline limits at their edges: values, fields, ownedBy, search, mode', () => {
   const rec = { mode: 'record', ownedBy: ['scope:org'] };
-  const pw = (values: unknown[]) => withSchema({ publicView: { ...rec, publishWhen: { field: 'state', in: values } } });
+  const pw = (values: unknown[], fieldType = 'string') =>
+    withSchema({
+      fields: [{ fieldId: 'title', fieldType: 'string' }, { fieldId: 'state', fieldType, filterable: true }],
+      publicView: { ...rec, publishWhen: { field: 'state', in: values } },
+    });
   assert.deepEqual(issues(pw(['x'.repeat(256)])), []);
   assert.ok(issues(pw(['x'.repeat(257)])).length > 0, 'a value over 256 characters');
   for (const bad of [{}, [], null]) assert.ok(issues(pw([bad])).length > 0, `item ${JSON.stringify(bad)}`);
-  assert.deepEqual(issues(pw([1, '1'])), [], 'a number and a string are two values');
+  // A value must have the field's type, as the platform requires, so a number and a string cannot share one field
+  assert.ok(issues(pw([1, '1'])).some((i) => i.includes('to match field')), 'a number on a string field');
   // The platform's storable-number contract: the signed 64-bit range for every number, and a nonzero magnitude >= 1e-130.
-  assert.deepEqual(issues(pw([0, -5, 1e-130, 1.5, 9.2e18, -9.2e18, 2 ** 63 - 1024])), []);
+  assert.deepEqual(issues(pw([0, -5, 1e-130, 1.5, 9.2e18, -9.2e18, 2 ** 63 - 1024], 'number')), []);
   for (const n of [2 ** 63, -(2 ** 63), 9.3e18, 1e20, 1e125, 1e126, -1e126, 1e-131]) {
-    assert.ok(issues(pw([n])).some((i) => i.includes('magnitude')), `the platform cannot store ${n}`);
+    assert.ok(issues(pw([n], 'number')).some((i) => i.includes('magnitude')), `the platform cannot store ${n}`);
   }
   assert.ok(issues(withSchema({ publicView: { fields: [], ownedBy: ['userId'] } })).length > 0, 'fields: [] is refused');
   assert.deepEqual(issues(withSchema({ publicView: { mode: 'projection', fields: ['title'], ownedBy: ['userId'] } })), []);
@@ -168,12 +183,13 @@ test('publicView offline limits at their edges: values, fields, ownedBy, search,
   assert.ok(own(['scope:tenant']).some((i) => i.includes('reserved namespace')), 'a forbidden namespace');
   assert.deepEqual(issues(withSchema({ publicView: { ...rec, publicViewVersion: 1.5 } })), [], 'publicViewVersion is ignored, as the platform ignores it');
   assert.ok(issues(withSchema({ publicView: { ...rec, mode: 'mirror' } })).length > 0, 'an unknown mode');
-  assert.ok(issues(pw([true, true])).some((i) => i.includes('more than once')), 'a repeated boolean');
-  assert.deepEqual(issues(pw([true, false, 'true'])), [], 'true and the string "true" are two values');
+  assert.ok(issues(pw([true, true], 'boolean')).some((i) => i.includes('more than once')), 'a repeated boolean');
+  assert.deepEqual(issues(pw([true, false], 'boolean')), [], 'true and false');
+  assert.ok(issues(pw([true, false, 'true'], 'boolean')).some((i) => i.includes('to match field')), 'the string "true" on a boolean field');
 });
 
 test('publicView: null alongside basedOn is accepted (a removal is not a declaration)', () => {
-  assert.deepEqual(issues(withSchema({ basedOn: 'listing-base', publicView: null })), []);
+  assert.deepEqual(issues(withSchema({ basedOn: 'listing-base', scopes: ['org:acme'], publicView: null })), []);
 });
 
 test('publicView: the schema-level rules a blueprint shows by itself are refused offline', () => {
@@ -278,4 +294,58 @@ test('a geocoded geo field on a projection view: both declarations on one schema
   );
   // listing an address field next to a coarse geo field is not refused (the CLI plan flags it)
   assert.deepEqual(issues(withSchema({ fields, publicView: { fields: ['title', 'where', 'city'], ownedBy: ['userId'], geoPrecision: { where: 1000 } } })), []);
+});
+
+// The platform's publishWhen rules that depend on the field, checked offline as the platform checks them
+function pwIssues(fields: unknown[], publishWhen: unknown, lookupFields: unknown[] = ['state']): string[] {
+  return issues(withSchema({ fields, lookupFields, publicView: { mode: 'record', ownedBy: ['scope:org'], publishWhen } }));
+}
+
+test('publishWhen: a valid string, enum, number and boolean field each pass', () => {
+  assert.deepEqual(pwIssues([{ fieldId: 'state', fieldType: 'string', filterable: true }], { field: 'state', in: ['open'] }), []);
+  assert.deepEqual(
+    pwIssues([{ fieldId: 'state', fieldType: 'enum', filterable: true, enumValues: ['open', 'closed'] }], { field: 'state', in: ['open'] }),
+    [],
+  );
+  assert.deepEqual(pwIssues([{ fieldId: 'state', fieldType: 'number', filterable: true }], { field: 'state', in: [1, 2] }), []);
+  assert.deepEqual(pwIssues([{ fieldId: 'state', fieldType: 'boolean', filterable: true }], { field: 'state', in: [true] }), []);
+  assert.deepEqual(pwIssues([{ fieldId: 'state', fieldType: 'string', filterable: true }], { field: 'state', in: ['open'] }, [{ fieldName: 'state' }]), []);
+});
+
+test('publishWhen: the field may not be sensitive', () => {
+  const hit = pwIssues([{ fieldId: 'state', fieldType: 'string', filterable: true, sensitive: true }], { field: 'state', in: ['open'] });
+  assert.ok(hit.some((m) => /is sensitive; publication cannot depend on a sensitive field/.test(m)), hit.join('\n'));
+});
+
+test('publishWhen: the field must be a string, enum, number or boolean field', () => {
+  const hit = pwIssues([{ fieldId: 'state', fieldType: 'date', filterable: true }], { field: 'state', in: ['2026-01-01'] });
+  assert.ok(hit.some((m) => /has type 'date'; it must be one of boolean, enum, number, string/.test(m)), hit.join('\n'));
+});
+
+test('publishWhen: the field must be filterable (an omitted filterable is false)', () => {
+  const hit = pwIssues([{ fieldId: 'state', fieldType: 'string' }], { field: 'state', in: ['open'] });
+  assert.ok(hit.some((m) => /must be filterable/.test(m)), hit.join('\n'));
+});
+
+test('publishWhen: the field must be a single-field lookup of its own (not absent, not only a composite leg)', () => {
+  const f = [{ fieldId: 'state', fieldType: 'string', filterable: true }, { fieldId: 'area', fieldType: 'string' }];
+  const none = pwIssues(f, { field: 'state', in: ['open'] }, []);
+  assert.ok(none.some((m) => /must be declared as a lookup field of its own/.test(m)), none.join('\n'));
+  const composite = pwIssues(f, { field: 'state', in: ['open'] }, [{ fieldNames: ['state', 'area'] }]);
+  assert.ok(composite.some((m) => /must be declared as a lookup field of its own/.test(m)), composite.join('\n'));
+});
+
+test('publishWhen: each value has the field type, and an enum value is one of enumValues', () => {
+  const num = pwIssues([{ fieldId: 'state', fieldType: 'number', filterable: true }], { field: 'state', in: [1, 'two'] });
+  assert.ok(num.some((m) => /in\[1\]: .*values must be numbers, to match field 'state' of type 'number'/.test(m)), num.join('\n'));
+  const bool = pwIssues([{ fieldId: 'state', fieldType: 'boolean', filterable: true }], { field: 'state', in: ['true'] });
+  assert.ok(bool.some((m) => /values must be booleans/.test(m)), bool.join('\n'));
+  const str = pwIssues([{ fieldId: 'state', fieldType: 'string', filterable: true }], { field: 'state', in: [1] });
+  assert.ok(str.some((m) => /values must be non-empty strings of at most 256 characters/.test(m)), str.join('\n'));
+  const en = pwIssues(
+    [{ fieldId: 'state', fieldType: 'enum', filterable: true, enumValues: ['open', 'closed'] }],
+    { field: 'state', in: ['open', 'archived'] },
+  );
+  assert.ok(en.some((m) => /in\[1\]: .*and each one of the field's enumValues/.test(m)), en.join('\n'));
+  assert.equal(en.length, 1, 'only the non-member is refused');
 });

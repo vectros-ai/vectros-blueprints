@@ -11,6 +11,7 @@ import {
   contextNameOf,
   companyNameOf,
   BlueprintValidationError,
+  FIELD_TYPES,
   type Blueprint,
 } from '../src/types.js';
 import { BUNDLED_BLUEPRINTS, BLUEPRINT_NAMES, getBlueprint } from '../src/index.js';
@@ -87,8 +88,8 @@ test('companyName is genuinely optional — absent is valid, unlike contextId/na
   assert.equal(b.companyName, undefined);
 });
 
-test('companyName rejects an empty string (min(1), same posture as contextName)', () => {
-  assert.throws(() => parseBlueprint(minimal({ companyName: '' })), BlueprintValidationError);
+test('companyName accepts an empty string, as the platform does (only its length is limited)', () => {
+  assert.equal(parseBlueprint(minimal({ companyName: '' })).companyName, '');
 });
 
 test('companyNameOf returns the field verbatim, with NO forced default unlike contextNameOf', () => {
@@ -280,7 +281,7 @@ test('GUARD: every bundled field uses a platform-supported fieldType', () => {
   // 400 "Allowed: [enum, boolean, number, array, reference, date, object, string]".
   // The fake-client harness can't catch that, so guard it here at change-time
   // (a string array is `array`, not `string[]`).
-  const ALLOWED = new Set(['enum', 'boolean', 'number', 'array', 'reference', 'date', 'object', 'string']);
+  const ALLOWED: ReadonlySet<string> = new Set(FIELD_TYPES);
   for (const b of BUNDLED_BLUEPRINTS) {
     for (const s of b.schemas) {
       for (const f of s.fields) {

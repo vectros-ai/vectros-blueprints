@@ -116,6 +116,19 @@ test('a blueprint script entry takes inputSchema (checked offline) and optInOper
   assert.deepEqual(issues(withScript({ optInOperations: [] })), [], 'an empty list is the same as none');
 });
 
+test('optInOperations: each entry is a non-empty string; which names is the platform\'s decision', () => {
+  // An empty name is never an operation: refused offline, at the entry's own path.
+  assert.ok(issues(withScript({ optInOperations: [''] })).some((i) => /scripts\.find\.optInOperations\[0\]: an operation name cannot be empty/.test(i)));
+  assert.ok(issues(withScript({ optInOperations: ['a', ''] })).some((i) => /optInOperations\[1\]: an operation name cannot be empty/.test(i)));
+  // A repeated entry is accepted: the platform stores the declaration distinct and sorted, so it is the same declaration.
+  assert.deepEqual(issues(withScript({ optInOperations: ['a', 'a'] })), []);
+  // Names are not checked against any list, and case is kept as written (the platform compares exactly).
+  assert.deepEqual(issues(withScript({ optInOperations: ['Some.Name', 'some.name'] })), []);
+  // A non-string and a non-list are refused.
+  assert.ok(issues(withScript({ optInOperations: [null] })).length > 0);
+  assert.ok(issues(withScript({ optInOperations: 'a' })).length > 0);
+});
+
 test('inputSchema: enum on an object node, enum [null] and required with no properties are refused as the platform does', () => {
   assert.match(inputSchemaIssue(obj({ properties: { a: { type: 'object', enum: [{}] } } })) ?? '', /enum values must be object values/);
   assert.match(inputSchemaIssue(obj({ properties: { a: { type: 'string', enum: [null] } } })) ?? '', /enum values must be string values/);
@@ -149,4 +162,30 @@ test('inputSchema: a member set to undefined is not sent, so it is neither check
   assert.ok(sameJson(stored, storedInputSchemaForm(declared)), 'an undefined member must not make every apply push');
   assert.ok(sameJson({ a: 1, b: undefined }, { a: 1 }));
   assert.ok(!sameJson({ a: null }, {}), 'null is sent, so it still counts');
+});
+
+test('optInOperations: at most 16 entries, counted as sent (repeats count), as the platform counts them', () => {
+  const ops = (n: number, name?: string) => Array.from({ length: n }, (_, i) => name ?? `op${i}`);
+  assert.deepEqual(issues(withScript({ optInOperations: ops(16) })), []);
+  const tooMany = issues(withScript({ optInOperations: ops(17) }));
+  assert.ok(tooMany.some((i) => /^scripts\.find\.optInOperations: an operation list has more entries than a version may declare$/.test(i)), tooMany.join('\n'));
+  // The platform counts the list before removing repeats, so 17 copies of one name are refused too.
+  assert.ok(issues(withScript({ optInOperations: ops(17, 'same') })).some((i) => /more entries than a version may declare/.test(i)));
+  assert.deepEqual(issues(withScript({ optInOperations: ops(16, 'same') })), []);
+  // The message names no number and no operation.
+  for (const i of tooMany) assert.doesNotMatch(i.replace(/^[^:]*:/, ''), /\d/);
+});
+
+test('destinations: aliases by the platform rule, no repeats; optional; not part of the version', () => {
+  assert.deepEqual(issues(withScript({ destinations: ['crm', 'billing-api', 'a1'] })), []);
+  assert.deepEqual(issues(withScript({ destinations: [] })), []);
+  assert.deepEqual(issues(withScript({})), []);
+  // The alias rule's edges: a lowercase letter first, then 1 to 39 more.
+  assert.deepEqual(issues(withScript({ destinations: ['a'.repeat(40)] })), []);
+  assert.ok(issues(withScript({ destinations: ['a'.repeat(41)] })).some((i) => /destinations\[0\]: a destination alias is/.test(i)));
+  for (const bad of ['a', '1crm', 'Crm', 'crm_api', '-crm', '']) {
+    assert.ok(issues(withScript({ destinations: [bad] })).some((i) => /scripts\.find\.destinations\[0\]: a destination alias is/.test(i)), bad);
+  }
+  assert.ok(issues(withScript({ destinations: ['crm', 'mail', 'crm'] })).some((i) => /destinations\[2\]: destination 'crm' is listed twice/.test(i)));
+  assert.ok(issues(withScript({ destinations: 'crm' })).length > 0);
 });

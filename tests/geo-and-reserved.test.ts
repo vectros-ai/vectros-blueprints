@@ -1,6 +1,7 @@
 /**
  * The geo field type's declaration rules, and the search-index names the platform keeps for itself, refused offline as the
- * platform refuses them on a schema write. The pilot flag (whether geo is enabled for the account) is the platform's alone.
+ * platform refuses them on a schema write. Whether geo is on for a tenant (an owner of the account signs the Geocoding waiver for it in
+ * the developer portal) is the platform's to check, not this validator's.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

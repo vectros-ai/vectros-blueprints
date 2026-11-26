@@ -675,5 +675,6 @@ test('fields: REJECTS a SENSITIVE sortBy target too — every projectable path i
     roles: { r: [{ allowedActions: ['records:r:intake'] }] },
     triggers: { t: { firingSource, scriptRef, fields: ['secret'], roleIds: ['r'] } },
   }));
-  assert.deepEqual(paths, ['triggers.t.fields[0]']);
+  // the platform also refuses a sensitive sortBy target on the schema itself
+  assert.deepEqual(paths, ['schemas[0].lookupFields[0].sortBy', 'triggers.t.fields[0]']);
 });
